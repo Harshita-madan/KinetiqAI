@@ -30,9 +30,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Download pose landmarker model if not present
-MODEL_PATH = "pose_landmarker_lite.task"
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+# Download pose landmarker model if not present (using Full model for better accuracy)
+MODEL_PATH = "pose_landmarker_full.task"
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
 
 if not os.path.exists(MODEL_PATH):
     print("Downloading pose landmarker model...")
@@ -64,7 +64,7 @@ KEYPOINT_NAMES = [
     'left_foot_index', 'right_foot_index'
 ]
 
-# Map MediaPipe landmarks to simplified keypoint names
+# Map MediaPipe landmarks to simplified keypoint names (Full model with 33 keypoints)
 SIMPLIFIED_KEYPOINTS = {
     0: 'nose',
     2: 'left_eye',
@@ -77,12 +77,22 @@ SIMPLIFIED_KEYPOINTS = {
     14: 'right_elbow',
     15: 'left_wrist',
     16: 'right_wrist',
+    17: 'left_pinky',
+    18: 'right_pinky',
+    19: 'left_index',
+    20: 'right_index',
+    21: 'left_thumb',
+    22: 'right_thumb',
     23: 'left_hip',
     24: 'right_hip',
     25: 'left_knee',
     26: 'right_knee',
     27: 'left_ankle',
-    28: 'right_ankle'
+    28: 'right_ankle',
+    29: 'left_heel',
+    30: 'right_heel',
+    31: 'left_foot_index',
+    32: 'right_foot_index'
 }
 
 
@@ -196,7 +206,7 @@ def get_keypoint(keypoints: List[Keypoint], name: str) -> Optional[Keypoint]:
 
 
 def analyze_squat(keypoints: List[Keypoint]) -> PostureAnalysis:
-    """Analyze squat form."""
+    """Analyze squat form with enhanced criteria."""
     score = 100
     mistakes = []
     feedback = []
@@ -207,46 +217,66 @@ def analyze_squat(keypoints: List[Keypoint]) -> PostureAnalysis:
     left_shoulder = get_keypoint(keypoints, 'left_shoulder')
     right_hip = get_keypoint(keypoints, 'right_hip')
     right_knee = get_keypoint(keypoints, 'right_knee')
+    right_ankle = get_keypoint(keypoints, 'right_ankle')
     
     if left_hip and left_knee and left_ankle:
-        # Check knee angle (should be ~90 degrees at bottom of squat)
+        # Enhanced knee angle analysis (optimal range: 80-100 degrees)
         knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
         
-        if knee_angle > 160:
-            feedback.append("Start lowering into the squat")
-        elif knee_angle > 120:
-            mistakes.append("🟡 Go deeper - aim for thighs parallel to ground")
-            score -= 15
-        elif knee_angle < 70:
-            mistakes.append("🟡 Don't go too deep - maintain control")
-            score -= 10
-        else:
-            feedback.append("✅ Good squat depth!")
-        
-        # Check if knees go past toes
-        if left_knee.x < left_ankle.x - 0.05:
-            mistakes.append("🔴 Knees going too far forward - sit back more")
+        if knee_angle > 165:
+            feedback.append("Begin lowering into squat position")
+        elif knee_angle > 130:
+            mistakes.append("🟡 Squat deeper - thighs not parallel yet")
             score -= 20
+        elif knee_angle > 100:
+            mistakes.append("🟡 Go slightly deeper for full range")
+            score -= 10
+        elif knee_angle >= 80 and knee_angle <= 100:
+            feedback.append("✅ Perfect squat depth!")
+        elif knee_angle >= 70 and knee_angle < 80:
+            mistakes.append("🟡 Slightly too deep - risk for knees")
+            score -= 8
+        else:
+            mistakes.append("🔴 Too deep - maintain control")
+            score -= 15
+        
+        # Enhanced knee tracking (should not pass toes)
+        if left_knee.x < left_ankle.x - 0.08:
+            mistakes.append("🔴 Knees too far forward - sit back into hips")
+            score -= 25
+        elif left_knee.x < left_ankle.x - 0.03:
+            mistakes.append("🟡 Watch knee position - keep over ankles")
+            score -= 12
     
     if left_shoulder and left_hip:
-        # Check back angle (should stay relatively upright)
+        # Enhanced torso angle (should be relatively upright)
         back_lean = abs(left_shoulder.x - left_hip.x)
-        if back_lean > 0.15:
-            mistakes.append("🔴 Keep chest up - avoid leaning forward")
-            score -= 20
-        elif back_lean > 0.08:
-            mistakes.append("🟡 Try to maintain more upright torso")
-            score -= 10
-        else:
-            feedback.append("✅ Good chest position!")
+        if back_lean > 0.18:
+            mistakes.append("🔴 Excessive forward lean - engage core")
+            score -= 25
+        elif back_lean > 0.12:
+            mistakes.append("🟡 Reduce forward lean - chest up")
+            score -= 15
+        elif back_lean < 0.05:
+            feedback.append("✅ Excellent upright torso!")
     
     if left_knee and right_knee and left_hip and right_hip:
-        # Check knee alignment
+        # Enhanced knee alignment (knee valgus check)
         knee_width = abs(left_knee.x - right_knee.x)
         hip_width = abs(left_hip.x - right_hip.x)
-        if knee_width < hip_width * 0.7:
-            mistakes.append("🔴 Knees caving in - push knees out")
-            score -= 20
+        if knee_width < hip_width * 0.65:
+            mistakes.append("🔴 Knee valgus - push knees outward")
+            score -= 25
+        elif knee_width < hip_width * 0.8:
+            mistakes.append("🟡 Knees slightly inward - maintain alignment")
+            score -= 12
+    
+    # Check foot stability (both feet should be flat)
+    if left_ankle and right_ankle:
+        foot_stability = abs(left_ankle.y - right_ankle.y)
+        if foot_stability > 0.05:
+            mistakes.append("🟡 Uneven weight distribution - balance on both feet")
+            score -= 10
     
     if not mistakes:
         feedback.append("🎯 Perfect squat form!")

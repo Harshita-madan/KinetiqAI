@@ -9,6 +9,7 @@ import {
   Alert,
   Platform,
 } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +21,7 @@ import { colors, spacing, fontSize } from '../theme';
 import { useNavigation, useRoute, CommonActions } from '@react-navigation/native';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const CAMERA_HEIGHT = SCREEN_HEIGHT * 0.9; // Nearly full-screen (90%)
 
 interface RouteParams {
   exercise: string;
@@ -44,6 +46,16 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   const [isInitializing, setIsInitializing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
+  const [repCount, setRepCount] = useState(0);
+  const [repStage, setRepStage] = useState<'up' | 'down' | null>(null);
+  
+  // Temporal smoothing for skeleton
+  const poseHistoryRef = useRef<Pose[]>([]);
+  const SMOOTHING_WINDOW = 3; // Average last 3 poses for smoother skeleton
+  
+  // Rep counting hysteresis (prevent false counts)
+  const lastRepAngleRef = useRef<number>(0);
+  const repTransitionThresholdRef = useRef<number>(20); // Minimum angle change for rep
 
   const cameraRef = useRef<CameraView>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -89,6 +101,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       
       if (serverAvailable) {
         console.log('✅ Backend pose server available - using API mode');
+        console.log('⚡ Skipping TensorFlow.js initialization (not needed with backend)');
         setUseBackendAPI(true);
         setDetectionMode('api');
         setIsDetectorReady(true);
@@ -263,10 +276,10 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           exif: false,
         };
         
-        // Capture with timeout
+        // Capture with longer timeout for Full model processing
         const capturePromise = cameraRef.current.takePictureAsync(captureOptions);
         const timeoutPromise = new Promise<null>((resolve) => 
-          setTimeout(() => resolve(null), 2000)
+          setTimeout(() => resolve(null), 5000) // Increased to 5s for Full model
         );
         
         const photo = await Promise.race([capturePromise, timeoutPromise]);
@@ -278,7 +291,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           if (response && response.success && response.poses.length > 0) {
             const pose = response.poses[0];
             const imageWidth = photo.width || SCREEN_WIDTH;
-            const imageHeight = photo.height || (SCREEN_HEIGHT * 0.6);
+            const imageHeight = photo.height || CAMERA_HEIGHT;
             
             // Process the detected pose
             processDetectedPose(pose, imageWidth, imageHeight);
@@ -335,7 +348,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
         })),
       };
       
-      processDetectedPose(animatedPose, SCREEN_WIDTH, SCREEN_HEIGHT * 0.6);
+      processDetectedPose(animatedPose, SCREEN_WIDTH, CAMERA_HEIGHT);
     } catch (error) {
       console.error('Simulated detection error:', error);
     }
@@ -359,7 +372,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 
       let poses: Pose[] = [];
       let imageWidth = SCREEN_WIDTH;
-      let imageHeight = SCREEN_HEIGHT * 0.6;
+      let imageHeight = CAMERA_HEIGHT;
       
       isCapturingRef.current = true;
       
@@ -385,7 +398,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           
           if (photo && photo.base64) {
             imageWidth = photo.width || SCREEN_WIDTH;
-            imageHeight = photo.height || (SCREEN_HEIGHT * 0.6);
+            imageHeight = photo.height || CAMERA_HEIGHT;
             
             // Process the frame through pose detection
             poses = await poseDetectionService.detectPose(photo.base64);
@@ -437,7 +450,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     // Scale coordinates to screen dimensions
     // MoveNet returns pixel coordinates based on input image size
     const imgWidth = imageWidth || SCREEN_WIDTH;
-    const imgHeight = imageHeight || (SCREEN_HEIGHT * 0.6);
+    const imgHeight = imageHeight || CAMERA_HEIGHT;
     
     const scaledPose: Pose = {
       ...pose,
@@ -449,12 +462,42 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
         return {
           ...kp,
           x: isNormalized ? kp.x * SCREEN_WIDTH : (kp.x / imgWidth) * SCREEN_WIDTH,
-          y: isNormalized ? kp.y * (SCREEN_HEIGHT * 0.6) : (kp.y / imgHeight) * (SCREEN_HEIGHT * 0.6),
+          y: isNormalized ? kp.y * CAMERA_HEIGHT : (kp.y / imgHeight) * CAMERA_HEIGHT,
         };
       }),
     };
 
-    setCurrentPose(scaledPose);
+    // Temporal smoothing: Average poses over last N frames for smoother skeleton
+    poseHistoryRef.current.push(scaledPose);
+    if (poseHistoryRef.current.length > SMOOTHING_WINDOW) {
+      poseHistoryRef.current.shift();
+    }
+    
+    // Calculate smoothed pose by averaging keypoint positions
+    const smoothedPose: Pose = {
+      ...scaledPose,
+      keypoints: scaledPose.keypoints.map((kp, idx) => {
+        const historicalKeypoints = poseHistoryRef.current
+          .map(p => p.keypoints[idx])
+          .filter(k => k && k.score && k.score > 0.3);
+        
+        if (historicalKeypoints.length === 0) return kp;
+        
+        const avgX = historicalKeypoints.reduce((sum, k) => sum + k.x, 0) / historicalKeypoints.length;
+        const avgY = historicalKeypoints.reduce((sum, k) => sum + k.y, 0) / historicalKeypoints.length;
+        
+        return {
+          ...kp,
+          x: avgX,
+          y: avgY
+        };
+      })
+    };
+
+    setCurrentPose(smoothedPose);
+
+    // Count reps based on exercise type
+    countReps(scaledPose);
 
     // Analyze posture with basic form analysis
     const analysis = poseDetectionService.analyzePosture(scaledPose, exercise);
@@ -479,6 +522,77 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     }
   };
 
+  // Rep counting logic with hysteresis (prevents false counts from minor movements)
+  const countReps = (pose: Pose) => {
+    if (!isActive) return;
+
+    const exerciseLower = exercise.toLowerCase();
+    
+    // Get keypoints
+    const leftShoulder = pose.keypoints.find(kp => kp.name === 'left_shoulder');
+    const leftElbow = pose.keypoints.find(kp => kp.name === 'left_elbow');
+    const leftWrist = pose.keypoints.find(kp => kp.name === 'left_wrist');
+    const leftHip = pose.keypoints.find(kp => kp.name === 'left_hip');
+    const leftKnee = pose.keypoints.find(kp => kp.name === 'left_knee');
+    const leftAnkle = pose.keypoints.find(kp => kp.name === 'left_ankle');
+
+    if (exerciseLower.includes('curl') || exerciseLower.includes('bicep')) {
+      // Bicep curl counting with hysteresis
+      if (leftShoulder && leftElbow && leftWrist) {
+        const angle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+        
+        // Extended position (arm straight)
+        if (angle > 160 && repStage !== 'down') {
+          setRepStage('down');
+          lastRepAngleRef.current = angle;
+        }
+        // Contracted position (arm bent) - requires significant angle change
+        if (angle < 40 && repStage === 'down' && (lastRepAngleRef.current - angle) > 120) {
+          setRepStage('up');
+          setRepCount(prev => prev + 1);
+          lastRepAngleRef.current = angle;
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        }
+      }
+    } else if (exerciseLower.includes('squat')) {
+      // Squat counting with hysteresis
+      if (leftHip && leftKnee && leftAnkle) {
+        const angle = calculateAngle(leftHip, leftKnee, leftAnkle);
+        
+        // Standing position
+        if (angle > 160 && repStage !== 'up') {
+          setRepStage('up');
+          lastRepAngleRef.current = angle;
+        }
+        // Squat position - requires going below 100° from standing
+        if (angle < 100 && repStage === 'up' && (lastRepAngleRef.current - angle) > 60) {
+          setRepStage('down');
+          setRepCount(prev => prev + 1);
+          lastRepAngleRef.current = angle;
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        }
+      }
+    } else if (exerciseLower.includes('push')) {
+      // Push-up counting with hysteresis
+      if (leftShoulder && leftElbow && leftWrist) {
+        const angle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+        
+        // Extended position (plank)
+        if (angle > 160 && repStage !== 'up') {
+          setRepStage('up');
+          lastRepAngleRef.current = angle;
+        }
+        // Lowered position - requires going below 90° from plank
+        if (angle < 90 && repStage === 'up' && (lastRepAngleRef.current - angle) > 70) {
+          setRepStage('down');
+          setRepCount(prev => prev + 1);
+          lastRepAngleRef.current = angle;
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        }
+      }
+    }
+  };
+
   const handleStartStop = async () => {
     if (isActive) {
       // Stop and show summary
@@ -496,6 +610,8 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       setIsActive(true);
       setTimeElapsed(0);
       setScores([]);
+      setRepCount(0);
+      setRepStage(null);
     }
   };
 
@@ -512,6 +628,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       date: new Date().toISOString(),
       duration: timeElapsed,
       averageScore: Math.round(averageScore),
+      reps: repCount, // Include rep count in session data
       mistakes: postureAnalysis?.mistakes || [],
       feedback: [...(postureAnalysis?.feedback || []), ...(postureAnalysis?.personalizedInsights || [])],
       timestamp: Date.now(),
@@ -539,35 +656,128 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Calculate angle between three keypoints (like in MediaPipe tutorial)
+  const calculateAngle = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number => {
+    const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+    let angle = Math.abs((radians * 180.0) / Math.PI);
+    if (angle > 180.0) {
+      angle = 360 - angle;
+    }
+    return angle;
+  };
+
+  // Render angle annotations (like MediaPipe tutorial)
+  const renderAngles = () => {
+    if (!currentPose) return null;
+
+    const getKeypoint = (name: string) =>
+      currentPose.keypoints.find((kp) => kp.name === name);
+
+    const angles = [];
+
+    // Left elbow angle
+    const shoulder = getKeypoint('left_shoulder');
+    const elbow = getKeypoint('left_elbow');
+    const wrist = getKeypoint('left_wrist');
+    
+    if (shoulder && elbow && wrist && shoulder.score && elbow.score && wrist.score &&
+        shoulder.score > 0.3 && elbow.score > 0.3 && wrist.score > 0.3) {
+      const elbowAngle = calculateAngle(shoulder, elbow, wrist);
+      angles.push(
+        <View
+          key="left-elbow-angle"
+          style={[
+            styles.angleLabel,
+            { left: elbow.x - 20, top: elbow.y - 30 }
+          ]}
+        >
+          <Text style={styles.angleLabelText}>{Math.round(elbowAngle)}°</Text>
+        </View>
+      );
+    }
+
+    // Left knee angle
+    const hip = getKeypoint('left_hip');
+    const knee = getKeypoint('left_knee');
+    const ankle = getKeypoint('left_ankle');
+    
+    if (hip && knee && ankle && hip.score && knee.score && ankle.score &&
+        hip.score > 0.3 && knee.score > 0.3 && ankle.score > 0.3) {
+      const kneeAngle = calculateAngle(hip, knee, ankle);
+      angles.push(
+        <View
+          key="left-knee-angle"
+          style={[
+            styles.angleLabel,
+            { left: knee.x - 20, top: knee.y - 30 }
+          ]}
+        >
+          <Text style={styles.angleLabelText}>{Math.round(kneeAngle)}°</Text>
+        </View>
+      );
+    }
+
+    return <>{angles}</>;
+  };
+
   const renderSkeleton = () => {
     if (!currentPose) return null;
 
+    // MediaPipe POSE_CONNECTIONS - Complete skeleton connections
     const connections = [
+      // Face
+      ['nose', 'left_eye'],
+      ['nose', 'right_eye'],
+      ['left_eye', 'left_ear'],
+      ['right_eye', 'right_ear'],
+      // Torso
       ['left_shoulder', 'right_shoulder'],
-      ['left_shoulder', 'left_elbow'],
-      ['left_elbow', 'left_wrist'],
-      ['right_shoulder', 'right_elbow'],
-      ['right_elbow', 'right_wrist'],
       ['left_shoulder', 'left_hip'],
       ['right_shoulder', 'right_hip'],
       ['left_hip', 'right_hip'],
+      // Left arm
+      ['left_shoulder', 'left_elbow'],
+      ['left_elbow', 'left_wrist'],
+      // Right arm
+      ['right_shoulder', 'right_elbow'],
+      ['right_elbow', 'right_wrist'],
+      // Left leg
       ['left_hip', 'left_knee'],
       ['left_knee', 'left_ankle'],
+      // Right leg
       ['right_hip', 'right_knee'],
       ['right_knee', 'right_ankle'],
+      // Hand details (enhanced with Full model)
+      ['left_wrist', 'left_pinky'],
+      ['left_wrist', 'left_index'],
+      ['right_wrist', 'right_pinky'],
+      ['right_wrist', 'right_index'],
+      // Foot details
+      ['left_ankle', 'left_heel'],
+      ['left_ankle', 'left_foot_index'],
+      ['right_ankle', 'right_heel'],
+      ['right_ankle', 'right_foot_index'],
     ];
 
     const getKeypoint = (name: string) =>
       currentPose.keypoints.find((kp) => kp.name === name);
 
+    // MediaPipe colors: (245,117,66) orange and (245,66,230) magenta
     const lineColor = postureAnalysis?.color === 'green' 
-      ? '#56E8A0' 
+      ? 'rgb(245,117,66)' // MediaPipe orange for good form
       : postureAnalysis?.color === 'yellow' 
-      ? '#E8C956' 
-      : '#E8569D';
+      ? 'rgb(245,200,66)' // Yellow for caution
+      : 'rgb(245,66,100)'; // Red-pink for errors
+    
+    const jointColor = postureAnalysis?.color === 'green' 
+      ? 'rgb(245,66,230)' // MediaPipe magenta for joints
+      : postureAnalysis?.color === 'yellow' 
+      ? 'rgb(245,180,66)' 
+      : 'rgb(245,66,130)';
 
     return (
-      <Svg style={styles.skeletonOverlay} width={SCREEN_WIDTH} height={SCREEN_HEIGHT * 0.6}>
+      <Svg style={styles.skeletonOverlay} width={SCREEN_WIDTH} height={CAMERA_HEIGHT}>
+        {/* Draw connections first (behind joints) */}
         {connections.map(([start, end], index) => {
           const startKp = getKeypoint(start);
           const endKp = getKeypoint(end);
@@ -576,26 +786,28 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 
           return (
             <Line
-              key={index}
+              key={`line-${index}`}
               x1={startKp.x}
               y1={startKp.y}
               x2={endKp.x}
               y2={endKp.y}
               stroke={lineColor}
-              strokeWidth={4}
+              strokeWidth={3}
+              strokeLinecap="round"
               opacity={0.8}
             />
           );
         })}
+        {/* Draw joints on top */}
         {currentPose.keypoints.map((kp, index) => {
           if (!kp.score || kp.score < 0.3) return null;
           return (
             <Circle
-              key={index}
+              key={`joint-${index}`}
               cx={kp.x}
               cy={kp.y}
-              r={8}
-              fill={lineColor}
+              r={4}
+              fill={jointColor}
               opacity={0.9}
             />
           );
@@ -648,9 +860,9 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
             console.log('Camera ready for video capture');
             setCameraReady(true);
           }}
-        >
-          {renderSkeleton()}
-        </CameraView>
+        />
+        {renderSkeleton()}
+        {renderAngles()}
 
         {/* Score Indicator */}
         {postureAnalysis && (
@@ -671,6 +883,20 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           >
             <Text style={styles.scoreText}>{Math.round(postureAnalysis.score)}</Text>
             <Text style={styles.scoreLabel}>Score</Text>
+          </View>
+        )}
+
+        {/* Rep Counter Box (like MediaPipe tutorial) */}
+        {isActive && (
+          <View style={styles.repCounterBox}>
+            <View style={styles.repCounterSection}>
+              <Text style={styles.repCounterLabel}>REPS</Text>
+              <Text style={styles.repCounterValue}>{repCount}</Text>
+            </View>
+            <View style={[styles.repCounterSection, { marginLeft: 20 }]}>
+              <Text style={styles.repCounterLabel}>STAGE</Text>
+              <Text style={styles.repCounterValue}>{repStage || '-'}</Text>
+            </View>
           </View>
         )}
 
@@ -835,6 +1061,32 @@ const styles = StyleSheet.create({
     color: colors.white,
     opacity: 0.9,
   },
+  repCounterBox: {
+    position: 'absolute',
+    top: spacing.lg,
+    left: spacing.lg,
+    backgroundColor: 'rgba(245, 117, 16, 0.9)',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    flexDirection: 'row',
+    minWidth: 180,
+  },
+  repCounterSection: {
+    alignItems: 'flex-start',
+  },
+  repCounterLabel: {
+    fontSize: 11,
+    color: 'rgba(0, 0, 0, 0.8)',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  repCounterValue: {
+    fontSize: 28,
+    color: colors.white,
+    fontWeight: '800',
+    lineHeight: 32,
+  },
   feedbackBox: {
     position: 'absolute',
     bottom: spacing.lg,
@@ -975,5 +1227,19 @@ const styles = StyleSheet.create({
     color: '#56E8A0',
     fontSize: 11,
     fontWeight: '600',
+  },
+  angleLabel: {
+    position: 'absolute',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.8)',
+  },
+  angleLabelText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
 });
