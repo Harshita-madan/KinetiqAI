@@ -1,6 +1,65 @@
 import * as tf from '@tensorflow/tfjs';
 import * as poseDetection from '@tensorflow-models/pose-detection';
-import '@tensorflow/tfjs-backend-webgl';
+import { Platform } from 'react-native';
+import '@tensorflow/tfjs-backend-cpu';
+// @ts-ignore - base-64 doesn't have types
+import { decode as atob } from 'base-64';
+// @ts-ignore - jpeg-js types may not match
+import * as jpeg from 'jpeg-js';
+
+// Register custom HTTP handler for React Native
+if (Platform.OS !== 'web') {
+  // Override the platform's fetch for TensorFlow
+  const originalPlatform = tf.ENV.platform;
+  
+  class ReactNativePlatform implements tf.Platform {
+    fetch(path: string, init?: RequestInit): Promise<Response> {
+      // Use global fetch that should be polyfilled
+      if (typeof global.fetch !== 'function') {
+        throw new Error('Fetch is not available. Make sure polyfills are loaded.');
+      }
+      return global.fetch(path, init);
+    }
+    now(): number {
+      return Date.now();
+    }
+    encode(text: string, encoding?: string): Uint8Array {
+      if (typeof global.TextEncoder !== 'undefined') {
+        return new global.TextEncoder().encode(text);
+      }
+      // Fallback
+      const utf8 = unescape(encodeURIComponent(text));
+      const result = new Uint8Array(utf8.length);
+      for (let i = 0; i < utf8.length; i++) {
+        result[i] = utf8.charCodeAt(i);
+      }
+      return result;
+    }
+    decode(bytes: Uint8Array, encoding?: string): string {
+      if (typeof global.TextDecoder !== 'undefined') {
+        return new global.TextDecoder().decode(bytes);
+      }
+      // Fallback
+      let result = '';
+      for (let i = 0; i < bytes.length; i++) {
+        result += String.fromCharCode(bytes[i]);
+      }
+      return decodeURIComponent(escape(result));
+    }
+    isTypedArray(a: unknown): a is Uint8Array | Float32Array | Int32Array | Uint8ClampedArray {
+      return a instanceof Uint8Array || 
+             a instanceof Float32Array || 
+             a instanceof Int32Array || 
+             a instanceof Uint8ClampedArray;
+    }
+    setTimeoutCustom?(functionRef: Function, delay: number): void {
+      setTimeout(functionRef, delay);
+    }
+  }
+  
+  // Register the custom platform
+  tf.env().setPlatform('react-native', new ReactNativePlatform());
+}
 
 export interface Keypoint {
   x: number;
@@ -38,10 +97,11 @@ export class PoseDetectionService {
       return;
     }
 
-    const timeoutDuration = 15000; // 15 seconds timeout
+    // Longer timeout for mobile devices (30s) vs web (15s)
+    const timeoutDuration = Platform.OS !== 'web' ? 30000 : 15000;
     const initPromise = this.performInitialization();
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Initialization timeout - model loading took too long')), timeoutDuration)
+      setTimeout(() => reject(new Error('Initialization timeout - model loading took too long. Please check your internet connection.')), timeoutDuration)
     );
 
     try {
@@ -57,18 +117,42 @@ export class PoseDetectionService {
 
   private async performInitialization(): Promise<void> {
     try {
-      console.log('Step 1: Setting up WebGL backend...');
-      await tf.setBackend('webgl');
+      console.log('Step 1: Setting up TensorFlow backend...');
+      console.log('Platform detected:', Platform.OS);
+      
+      // Always use CPU backend for React Native (iOS/Android)
+      // Only use WebGL for web platform
+      if (Platform.OS === 'web') {
+        console.log('Web platform - attempting WebGL backend');
+        try {
+          await tf.setBackend('webgl');
+        } catch (webglError) {
+          console.warn('WebGL failed, falling back to CPU:', webglError);
+          await tf.setBackend('cpu');
+        }
+      } else {
+        console.log('Mobile device (iOS/Android) - using CPU backend');
+        // Ensure CPU backend is properly set for mobile
+        try {
+          await tf.setBackend('cpu');
+        } catch (cpuError) {
+          console.error('CPU backend setup error:', cpuError);
+          throw new Error('Failed to initialize TensorFlow backend on mobile');
+        }
+      }
+      
       await tf.ready();
       console.log('✅ TensorFlow backend ready:', tf.getBackend());
 
       console.log('Step 2: Loading MoveNet model (this may take a moment)...');
       const model = poseDetection.SupportedModels.MoveNet;
+      
+      // Use lighter model for mobile devices with optimized settings
       const detectorConfig: poseDetection.MoveNetModelConfig = {
-        modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER, // More accurate than lightning
+        modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING, // Always use lightning for speed
         enableSmoothing: true,
-        minPoseScore: 0.2, // Lower threshold for better detection
-        multiPoseMaxDimension: 256,
+        minPoseScore: 0.15, // Lower threshold for better detection on mobile
+        multiPoseMaxDimension: 192, // Smaller for faster processing
       };
 
       this.detector = await poseDetection.createDetector(model, detectorConfig);
@@ -76,6 +160,14 @@ export class PoseDetectionService {
       console.log('✅ MoveNet model loaded successfully');
     } catch (error) {
       console.error('Initialization failed at step:', error);
+      
+      // Provide more detailed error information
+      if (error instanceof Error) {
+        console.error('Error name:', error.name);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+      }
+      
       throw error;
     }
   }
@@ -86,26 +178,127 @@ export class PoseDetectionService {
     }
 
     try {
-      // Convert image to tensor if needed
-      let inputTensor;
-      if (typeof imageData === 'string') {
-        // If it's a data URL or base64
-        const img = new Image();
-        img.src = imageData;
-        await new Promise((resolve) => { img.onload = resolve; });
-        inputTensor = tf.browser.fromPixels(img);
-      } else if (imageData instanceof HTMLImageElement || imageData instanceof HTMLVideoElement) {
-        inputTensor = tf.browser.fromPixels(imageData);
+      let inputTensor: tf.Tensor3D | null = null;
+      
+      if (Platform.OS !== 'web') {
+        // React Native: Convert base64 image to tensor
+        if (typeof imageData === 'string') {
+          console.log('Processing base64 image, length:', imageData.length);
+          
+          // Handle base64 encoded image
+          let base64Data = imageData;
+          
+          // Remove data URL prefix if present
+          if (base64Data.startsWith('data:')) {
+            base64Data = base64Data.split(',')[1];
+          }
+          
+          try {
+            // Decode base64 to binary
+            console.log('Decoding base64...');
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            console.log('Binary data size:', bytes.length);
+            
+            // Decode JPEG to raw pixel data
+            console.log('Decoding JPEG...');
+            const rawImageData = jpeg.decode(bytes, { useTArray: true, formatAsRGBA: true });
+            console.log('Image dimensions:', rawImageData.width, 'x', rawImageData.height);
+            
+            // Resize image for faster processing on mobile (max 256x256)
+            let { width, height, data } = rawImageData;
+            const maxDim = 256;
+            let resizedData = data;
+            let newWidth = width;
+            let newHeight = height;
+            
+            if (width > maxDim || height > maxDim) {
+              const scale = Math.min(maxDim / width, maxDim / height);
+              newWidth = Math.floor(width * scale);
+              newHeight = Math.floor(height * scale);
+              console.log(`Resizing from ${width}x${height} to ${newWidth}x${newHeight}`);
+              
+              // Simple nearest-neighbor resize for speed
+              resizedData = new Uint8Array(newWidth * newHeight * 4);
+              for (let y = 0; y < newHeight; y++) {
+                for (let x = 0; x < newWidth; x++) {
+                  const srcX = Math.floor(x / scale);
+                  const srcY = Math.floor(y / scale);
+                  const srcIdx = (srcY * width + srcX) * 4;
+                  const dstIdx = (y * newWidth + x) * 4;
+                  resizedData[dstIdx] = data[srcIdx];
+                  resizedData[dstIdx + 1] = data[srcIdx + 1];
+                  resizedData[dstIdx + 2] = data[srcIdx + 2];
+                  resizedData[dstIdx + 3] = data[srcIdx + 3];
+                }
+              }
+              width = newWidth;
+              height = newHeight;
+              data = resizedData;
+            }
+            
+            // Convert RGBA to RGB and create tensor
+            const rgbData = new Uint8Array(width * height * 3);
+            
+            for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+              rgbData[j] = data[i];       // R
+              rgbData[j + 1] = data[i + 1]; // G
+              rgbData[j + 2] = data[i + 2]; // B
+            }
+            
+            console.log('Creating tensor...');
+            inputTensor = tf.tensor3d(Array.from(rgbData), [height, width, 3], 'int32');
+            console.log('Tensor created successfully');
+            
+          } catch (decodeError) {
+            console.error('Failed to decode image:', decodeError);
+            return [];
+          }
+        } else {
+          // If it's already a tensor, use it directly
+          console.log('Using existing tensor');
+          inputTensor = imageData as tf.Tensor3D;
+        }
       } else {
-        inputTensor = imageData;
+        // Web platform: Use standard browser APIs
+        if (typeof imageData === 'string') {
+          const img = new (globalThis as any).Image();
+          img.crossOrigin = 'anonymous';
+          img.src = imageData;
+          await new Promise((resolve, reject) => { 
+            img.onload = resolve; 
+            img.onerror = reject;
+          });
+          inputTensor = tf.browser.fromPixels(img);
+        } else if (imageData instanceof HTMLImageElement || imageData instanceof HTMLVideoElement) {
+          inputTensor = tf.browser.fromPixels(imageData);
+        } else if (imageData instanceof tf.Tensor) {
+          inputTensor = imageData as tf.Tensor3D;
+        }
+      }
+      
+      if (!inputTensor) {
+        console.error('Failed to create input tensor');
+        return [];
       }
 
-      const poses = await this.detector.estimatePoses(inputTensor);
+      // Run pose detection with timeout for mobile
+      const detectionPromise = this.detector.estimatePoses(inputTensor);
+      const timeoutPromise = new Promise<null>((resolve) => 
+        setTimeout(() => {
+          console.warn('Pose estimation timeout');
+          resolve(null);
+        }, Platform.OS !== 'web' ? 3000 : 5000)
+      );
+      
+      const poses = await Promise.race([detectionPromise, timeoutPromise]);
       
       // Log detected poses for debugging
       if (poses && poses.length > 0) {
         console.log('Detected pose with', poses[0].keypoints.length, 'keypoints');
-        console.log('Sample keypoint:', poses[0].keypoints[0]);
       }
       
       // Clean up tensor to prevent memory leaks
@@ -113,11 +306,110 @@ export class PoseDetectionService {
         inputTensor.dispose();
       }
       
-      return poses;
+      return poses || [];
     } catch (error) {
       console.error('Pose detection error:', error);
       return [];
     }
+  }
+
+  // Generate simulated pose keypoints for fallback - exercise specific
+  generateSimulatedPose(exerciseType?: string): Pose {
+    const variation = () => (Math.random() - 0.5) * 0.08;
+    const exercise = exerciseType?.toLowerCase() || '';
+    
+    let keypoints: Keypoint[];
+    
+    if (exercise.includes('plank')) {
+      // Plank position - horizontal body
+      keypoints = [
+        { name: 'nose', x: 0.2 + variation(), y: 0.35 + variation(), score: 0.9 },
+        { name: 'left_eye', x: 0.18 + variation(), y: 0.33 + variation(), score: 0.9 },
+        { name: 'right_eye', x: 0.22 + variation(), y: 0.33 + variation(), score: 0.9 },
+        { name: 'left_ear', x: 0.15 + variation(), y: 0.34 + variation(), score: 0.8 },
+        { name: 'right_ear', x: 0.25 + variation(), y: 0.34 + variation(), score: 0.8 },
+        { name: 'left_shoulder', x: 0.3 + variation(), y: 0.4 + variation(), score: 0.9 },
+        { name: 'right_shoulder', x: 0.3 + variation(), y: 0.35 + variation(), score: 0.9 },
+        { name: 'left_elbow', x: 0.28 + variation(), y: 0.55 + variation(), score: 0.85 },
+        { name: 'right_elbow', x: 0.28 + variation(), y: 0.5 + variation(), score: 0.85 },
+        { name: 'left_wrist', x: 0.26 + variation(), y: 0.65 + variation(), score: 0.8 },
+        { name: 'right_wrist', x: 0.26 + variation(), y: 0.6 + variation(), score: 0.8 },
+        { name: 'left_hip', x: 0.55 + variation(), y: 0.42 + variation(), score: 0.9 },
+        { name: 'right_hip', x: 0.55 + variation(), y: 0.38 + variation(), score: 0.9 },
+        { name: 'left_knee', x: 0.7 + variation(), y: 0.45 + variation(), score: 0.85 },
+        { name: 'right_knee', x: 0.7 + variation(), y: 0.4 + variation(), score: 0.85 },
+        { name: 'left_ankle', x: 0.85 + variation(), y: 0.48 + variation(), score: 0.8 },
+        { name: 'right_ankle', x: 0.85 + variation(), y: 0.43 + variation(), score: 0.8 },
+      ];
+    } else if (exercise.includes('squat')) {
+      // Squat position - bent knees
+      keypoints = [
+        { name: 'nose', x: 0.5 + variation(), y: 0.2 + variation(), score: 0.9 },
+        { name: 'left_eye', x: 0.48 + variation(), y: 0.18 + variation(), score: 0.9 },
+        { name: 'right_eye', x: 0.52 + variation(), y: 0.18 + variation(), score: 0.9 },
+        { name: 'left_ear', x: 0.45 + variation(), y: 0.19 + variation(), score: 0.8 },
+        { name: 'right_ear', x: 0.55 + variation(), y: 0.19 + variation(), score: 0.8 },
+        { name: 'left_shoulder', x: 0.4 + variation(), y: 0.3 + variation(), score: 0.9 },
+        { name: 'right_shoulder', x: 0.6 + variation(), y: 0.3 + variation(), score: 0.9 },
+        { name: 'left_elbow', x: 0.35 + variation(), y: 0.4 + variation(), score: 0.85 },
+        { name: 'right_elbow', x: 0.65 + variation(), y: 0.4 + variation(), score: 0.85 },
+        { name: 'left_wrist', x: 0.45 + variation(), y: 0.45 + variation(), score: 0.8 },
+        { name: 'right_wrist', x: 0.55 + variation(), y: 0.45 + variation(), score: 0.8 },
+        { name: 'left_hip', x: 0.43 + variation(), y: 0.55 + variation(), score: 0.9 },
+        { name: 'right_hip', x: 0.57 + variation(), y: 0.55 + variation(), score: 0.9 },
+        { name: 'left_knee', x: 0.38 + variation(), y: 0.72 + variation(), score: 0.85 },
+        { name: 'right_knee', x: 0.62 + variation(), y: 0.72 + variation(), score: 0.85 },
+        { name: 'left_ankle', x: 0.4 + variation(), y: 0.92 + variation(), score: 0.8 },
+        { name: 'right_ankle', x: 0.6 + variation(), y: 0.92 + variation(), score: 0.8 },
+      ];
+    } else if (exercise.includes('push')) {
+      // Push-up position
+      keypoints = [
+        { name: 'nose', x: 0.25 + variation(), y: 0.3 + variation(), score: 0.9 },
+        { name: 'left_eye', x: 0.23 + variation(), y: 0.28 + variation(), score: 0.9 },
+        { name: 'right_eye', x: 0.27 + variation(), y: 0.28 + variation(), score: 0.9 },
+        { name: 'left_ear', x: 0.2 + variation(), y: 0.29 + variation(), score: 0.8 },
+        { name: 'right_ear', x: 0.3 + variation(), y: 0.29 + variation(), score: 0.8 },
+        { name: 'left_shoulder', x: 0.35 + variation(), y: 0.4 + variation(), score: 0.9 },
+        { name: 'right_shoulder', x: 0.35 + variation(), y: 0.35 + variation(), score: 0.9 },
+        { name: 'left_elbow', x: 0.32 + variation(), y: 0.55 + variation(), score: 0.85 },
+        { name: 'right_elbow', x: 0.32 + variation(), y: 0.5 + variation(), score: 0.85 },
+        { name: 'left_wrist', x: 0.3 + variation(), y: 0.68 + variation(), score: 0.8 },
+        { name: 'right_wrist', x: 0.3 + variation(), y: 0.63 + variation(), score: 0.8 },
+        { name: 'left_hip', x: 0.6 + variation(), y: 0.42 + variation(), score: 0.9 },
+        { name: 'right_hip', x: 0.6 + variation(), y: 0.38 + variation(), score: 0.9 },
+        { name: 'left_knee', x: 0.75 + variation(), y: 0.45 + variation(), score: 0.85 },
+        { name: 'right_knee', x: 0.75 + variation(), y: 0.4 + variation(), score: 0.85 },
+        { name: 'left_ankle', x: 0.9 + variation(), y: 0.48 + variation(), score: 0.8 },
+        { name: 'right_ankle', x: 0.9 + variation(), y: 0.43 + variation(), score: 0.8 },
+      ];
+    } else {
+      // Default standing pose
+      keypoints = [
+        { name: 'nose', x: 0.5 + variation(), y: 0.12 + variation(), score: 0.9 },
+        { name: 'left_eye', x: 0.48 + variation(), y: 0.1 + variation(), score: 0.9 },
+        { name: 'right_eye', x: 0.52 + variation(), y: 0.1 + variation(), score: 0.9 },
+        { name: 'left_ear', x: 0.45 + variation(), y: 0.11 + variation(), score: 0.8 },
+        { name: 'right_ear', x: 0.55 + variation(), y: 0.11 + variation(), score: 0.8 },
+        { name: 'left_shoulder', x: 0.4 + variation(), y: 0.22 + variation(), score: 0.9 },
+        { name: 'right_shoulder', x: 0.6 + variation(), y: 0.22 + variation(), score: 0.9 },
+        { name: 'left_elbow', x: 0.35 + variation(), y: 0.38 + variation(), score: 0.85 },
+        { name: 'right_elbow', x: 0.65 + variation(), y: 0.38 + variation(), score: 0.85 },
+        { name: 'left_wrist', x: 0.32 + variation(), y: 0.52 + variation(), score: 0.8 },
+        { name: 'right_wrist', x: 0.68 + variation(), y: 0.52 + variation(), score: 0.8 },
+        { name: 'left_hip', x: 0.45 + variation(), y: 0.52 + variation(), score: 0.9 },
+        { name: 'right_hip', x: 0.55 + variation(), y: 0.52 + variation(), score: 0.9 },
+        { name: 'left_knee', x: 0.44 + variation(), y: 0.72 + variation(), score: 0.85 },
+        { name: 'right_knee', x: 0.56 + variation(), y: 0.72 + variation(), score: 0.85 },
+        { name: 'left_ankle', x: 0.43 + variation(), y: 0.92 + variation(), score: 0.8 },
+        { name: 'right_ankle', x: 0.57 + variation(), y: 0.92 + variation(), score: 0.8 },
+      ];
+    }
+
+    return {
+      keypoints,
+      score: 0.85 + (Math.random() * 0.1)
+    };
   }
 
   // Helper function to get keypoint by name (MoveNet uses specific keypoint names)
@@ -157,9 +449,7 @@ export class PoseDetectionService {
     const mistakes: string[] = [];
     let score = 100;
 
-    console.log('Analyzing plank with', keypoints.length, 'keypoints');
-
-    // Get key body points using helper function
+    // Get key body points
     const leftShoulder = this.getKeypoint(keypoints, 'left_shoulder');
     const rightShoulder = this.getKeypoint(keypoints, 'right_shoulder');
     const leftHip = this.getKeypoint(keypoints, 'left_hip');
@@ -169,118 +459,100 @@ export class PoseDetectionService {
     const leftElbow = this.getKeypoint(keypoints, 'left_elbow');
     const rightElbow = this.getKeypoint(keypoints, 'right_elbow');
 
-    console.log('Key points found:', {
-      leftShoulder: !!leftShoulder,
-      rightShoulder: !!rightShoulder,
-      leftHip: !!leftHip,
-      rightHip: !!rightHip,
-    });
-
-    console.log('Confidence scores:', {
-      leftShoulder: leftShoulder?.score,
-      rightShoulder: rightShoulder?.score,
-      leftHip: leftHip?.score,
-      rightHip: rightHip?.score,
-    });
-
-    // More lenient confidence threshold
-    const minConfidence = 0.15;
+    const minConfidence = 0.2;
     if (!leftShoulder || !rightShoulder || !leftHip || !rightHip ||
         (leftShoulder.score && leftShoulder.score < minConfidence) ||
         (rightShoulder.score && rightShoulder.score < minConfidence)) {
-      console.log('Not enough visible keypoints for analysis');
       return {
-        score: 70, // More generous base score
+        score: 60,
         isCorrect: false,
-        feedback: ['Keep holding - adjust camera angle if needed'],
-        mistakes: ['Camera positioning could be improved'],
+        feedback: ['Position yourself so your full body is visible'],
+        mistakes: ['Body not fully visible to camera'],
         color: 'yellow',
       };
     }
 
-    console.log('Position data:', {
-      shoulderY: { left: leftShoulder.y, right: rightShoulder.y },
-      hipY: { left: leftHip.y, right: rightHip.y },
-    });
-
-    // Calculate average confidence for adaptive scoring
-    const avgConfidence = (leftShoulder.score || 0.5) + (rightShoulder.score || 0.5) + 
-                          (leftHip.score || 0.5) + (rightHip.score || 0.5);
-    const confidenceBonus = avgConfidence > 2.8 ? 5 : 0; // Bonus for high confidence detection
-
-    // Check body alignment (shoulder-hip-ankle should be relatively straight)
+    // 1. Check body alignment (shoulder-hip-ankle should form straight line)
     const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
     const hipMidY = (leftHip.y + rightHip.y) / 2;
-    const ankleMidY = leftAnkle && rightAnkle ? (leftAnkle.y + rightAnkle.y) / 2 : hipMidY;
+    const ankleMidY = leftAnkle && rightAnkle ? (leftAnkle.y + rightAnkle.y) / 2 : null;
 
-    // Much more lenient body alignment check
-    const bodyAlignment = Math.abs(hipMidY - (shoulderMidY + ankleMidY) / 2);
-    console.log('Body alignment check:', bodyAlignment);
-    
-    if (bodyAlignment > 70) {  // Very lenient threshold
-      mistakes.push('Engage your core to prevent hip sag');
-      score -= 12;  // Minimal penalty
-    } else if (bodyAlignment > 45) {
-      mistakes.push('Minor hip sag detected');
-      score -= 5;
+    // Calculate if hips are sagging (hips lower than expected)
+    const hipSag = hipMidY - shoulderMidY;
+    if (hipSag > 50) {
+      mistakes.push('🔴 Hips are sagging - engage your core!');
+      score -= 25;
+    } else if (hipSag > 30) {
+      mistakes.push('🟡 Slight hip sag - tighten your core');
+      score -= 15;
     }
 
-    // Check if hips are too high (very lenient)
-    const hipHeight = shoulderMidY - hipMidY;
-    console.log('Hip height difference:', hipHeight);
-    
-    if (hipHeight > 60) {  // Much more lenient
-      mistakes.push('Lower hips slightly for better alignment');
+    // 2. Check if hips are too high
+    if (hipSag < -30) {
+      mistakes.push('🔴 Hips too high - lower them to align with shoulders');
+      score -= 20;
+    } else if (hipSag < -15) {
+      mistakes.push('🟡 Hips slightly elevated');
       score -= 10;
-    } else if (hipHeight > 35) {
-      mistakes.push('Hips could be slightly lower');
-      score -= 5;
     }
 
-    // More lenient elbow position check
-    if (leftElbow && leftShoulder) {
-      const elbowShoulderDist = Math.abs(leftElbow.x - leftShoulder.x);
-      if (elbowShoulderDist > 70) {  // Increased tolerance
-        mistakes.push('Try to keep elbows under shoulders');
+    // 3. Check elbow position (should be under shoulders)
+    if (leftElbow && rightElbow) {
+      const elbowMidX = (leftElbow.x + rightElbow.x) / 2;
+      const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+      const elbowAlignment = Math.abs(elbowMidX - shoulderMidX);
+      
+      if (elbowAlignment > 40) {
+        mistakes.push('🔴 Elbows not under shoulders - reposition');
+        score -= 15;
+      } else if (elbowAlignment > 25) {
+        mistakes.push('🟡 Adjust elbows closer to shoulders');
         score -= 8;
       }
     }
 
-    // Very lenient head position
+    // 4. Check head position (neutral spine)
     const nose = this.getKeypoint(keypoints, 'nose');
-    if (nose && nose.y < shoulderMidY - 70) {
-      mistakes.push('Neutral neck position recommended');
+    if (nose && shoulderMidY) {
+      const headDrop = nose.y - shoulderMidY;
+      if (headDrop > 60) {
+        mistakes.push('🟡 Head dropping - look slightly ahead');
+        score -= 10;
+      } else if (headDrop < -20) {
+        mistakes.push('🟡 Keep neck neutral - don\'t look up');
+        score -= 8;
+      }
+    }
+
+    // 5. Check shoulder stability
+    const shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+    if (shoulderWidth < 80) {
+      mistakes.push('🟡 Widen your hand placement');
       score -= 5;
     }
 
-    // Add confidence bonus
-    score += confidenceBonus;
-
-    // Ensure minimum score of 75 for detected pose
-    score = Math.max(75, Math.min(100, score));
-    
-    const isCorrect = score >= 70;  // Much lower threshold
-    const color: 'green' | 'yellow' | 'red' = score >= 70 ? 'green' : score >= 55 ? 'yellow' : 'red';
-
-    console.log('Final plank score:', score, 'Mistakes:', mistakes.length);
+    const isCorrect = score >= 75;
+    const color: 'green' | 'yellow' | 'red' = score >= 80 ? 'green' : score >= 60 ? 'yellow' : 'red';
 
     const feedback: string[] = [];
-    if (isCorrect) {
-      feedback.push('🔥 Excellent plank form!');
-      feedback.push('✓ Body alignment looks great');
-      if (score >= 90) feedback.push('💪 Perfect execution!');
-    } else if (score >= 55) {
-      feedback.push('✓ Good form! You\'re doing well');
-      if (mistakes.length > 0) {
-        feedback.push('Tip: ' + mistakes[0]);
-      }
-    } else {
-      feedback.push('Keep working on:');
+    if (score >= 90) {
+      feedback.push('💪 Perfect plank form!');
+      feedback.push('✓ Body aligned beautifully');
+      feedback.push('✓ Core engaged properly');
+    } else if (score >= 75) {
+      feedback.push('✓ Great form!');
+      feedback.push('✓ Maintain this position');
+      if (mistakes.length > 0) feedback.push(mistakes[0]);
+    } else if (score >= 60) {
+      feedback.push('Good effort - minor adjustments:');
       feedback.push(...mistakes.slice(0, 2));
+    } else {
+      feedback.push('Focus on these corrections:');
+      feedback.push(...mistakes.slice(0, 3));
     }
 
     return {
-      score: Math.max(0, score),
+      score: Math.max(0, Math.min(100, score)),
       isCorrect,
       feedback,
       mistakes,
@@ -293,86 +565,108 @@ export class PoseDetectionService {
     const mistakes: string[] = [];
     let score = 100;
 
-    console.log('Analyzing squat');
-
     const leftHip = this.getKeypoint(keypoints, 'left_hip');
     const rightHip = this.getKeypoint(keypoints, 'right_hip');
     const leftKnee = this.getKeypoint(keypoints, 'left_knee');
     const rightKnee = this.getKeypoint(keypoints, 'right_knee');
     const leftAnkle = this.getKeypoint(keypoints, 'left_ankle');
     const rightAnkle = this.getKeypoint(keypoints, 'right_ankle');
+    const leftShoulder = this.getKeypoint(keypoints, 'left_shoulder');
+    const rightShoulder = this.getKeypoint(keypoints, 'right_shoulder');
 
-    const minConfidence = 0.15;
+    const minConfidence = 0.2;
     if (!leftHip || !leftKnee || !leftAnkle ||
         (leftHip.score && leftHip.score < minConfidence)) {
-      console.log('Squat: Not enough keypoints visible');
       return {
-        score: 75,  // Much more generous
-        isCorrect: true,  // Give benefit of doubt
-        feedback: ['✓ Keep going! Form looks good'],
-        mistakes: [],
-        color: 'green',
+        score: 60,
+        isCorrect: false,
+        feedback: ['Position yourself so your full body is visible'],
+        mistakes: ['Body not fully visible'],
+        color: 'yellow',
       };
     }
 
-    // Very lenient squat depth check
-    const depthDiff = leftHip.y - leftKnee.y;
-    console.log('Squat depth difference:', depthDiff);
-    
-    if (depthDiff < -40) {  // Very lenient
-      mistakes.push('Try going a bit deeper');
-      score -= 10;
-    } else if (depthDiff < -20) {
-      mistakes.push('Good depth');
-      score -= 3;
+    // 1. Check squat depth (hip should be at or below knee level)
+    const hipKneeDepth = leftHip.y - leftKnee.y;
+    if (hipKneeDepth > 40) {
+      mistakes.push('🔴 Not deep enough - squat lower!');
+      score -= 30;
+    } else if (hipKneeDepth > 20) {
+      mistakes.push('🟡 Go a bit deeper for full range');
+      score -= 15;
+    } else if (hipKneeDepth < -10) {
+      mistakes.push('✓ Excellent depth!');
     }
 
-    // Very lenient knee alignment
-    if (leftKnee.x > leftAnkle.x + 60) {  // Much more lenient
-      mistakes.push('Sit back slightly more');
+    // 2. Check knee alignment (knees shouldn't go too far past toes)
+    const kneeAnkleAlignment = leftKnee.x - leftAnkle.x;
+    if (kneeAnkleAlignment > 50) {
+      mistakes.push('🔴 Knees too far forward - sit back more!');
+      score -= 25;
+    } else if (kneeAnkleAlignment > 30) {
+      mistakes.push('🟡 Sit back slightly more');
+      score -= 12;
+    }
+
+    // 3. Check if knees are caving in (tracking over toes)
+    if (leftKnee && rightKnee && leftHip && rightHip) {
+      const kneeWidth = Math.abs(leftKnee.x - rightKnee.x);
+      const hipWidth = Math.abs(leftHip.x - rightHip.x);
+      if (kneeWidth < hipWidth * 0.7) {
+        mistakes.push('🔴 Knees caving in - push knees out!');
+        score -= 20;
+      } else if (kneeWidth < hipWidth * 0.85) {
+        mistakes.push('🟡 Keep knees tracking over toes');
+        score -= 10;
+      }
+    }
+
+    // 4. Check chest position (should stay upright)
+    if (leftShoulder && leftHip) {
+      const chestAngle = leftShoulder.x - leftHip.x;
+      if (Math.abs(chestAngle) > 80) {
+        mistakes.push('🔴 Keep chest up - avoid excessive forward lean');
+        score -= 18;
+      } else if (Math.abs(chestAngle) > 50) {
+        mistakes.push('🟡 Maintain upright chest position');
+        score -= 10;
+      }
+    }
+
+    // 5. Check weight distribution (heels should be on ground)
+    const heelAnkleDistance = Math.abs(leftAnkle.y - (leftKnee.y + 100));
+    if (heelAnkleDistance > 40) {
+      mistakes.push('🟡 Keep weight in heels');
       score -= 8;
     }
 
-    // Very lenient back angle
-    const leftShoulder = this.getKeypoint(keypoints, 'left_shoulder');
-    if (leftShoulder) {
-      const backAngle = Math.abs(leftShoulder.x - leftHip.x);
-      console.log('Back angle:', backAngle);
-      
-      if (backAngle > 100) {  // Very lenient
-        mistakes.push('Keep chest proud');
-        score -= 8;
-      }
-    }
-
-    // Generous minimum score
-    score = Math.max(75, Math.min(100, score));
-    
-    const isCorrect = score >= 70;
-    const color: 'green' | 'yellow' | 'red' = score >= 70 ? 'green' : score >= 55 ? 'yellow' : 'red';
-
-    console.log('Final squat score:', score);
+    const isCorrect = score >= 75;
+    const color: 'green' | 'yellow' | 'red' = score >= 80 ? 'green' : score >= 60 ? 'yellow' : 'red';
 
     const feedback: string[] = [];
-    if (isCorrect) {
-      feedback.push('🎯 Excellent squat!');
-      feedback.push('✓ Great form and depth');
-      if (score >= 95) feedback.push('💪 Textbook perfect!');
-    } else if (score >= 60) {
-      feedback.push('✓ Good squat! Keep it up');
-      if (mistakes.length > 0) {
+    if (score >= 90) {
+      feedback.push('💪 Textbook perfect squat!');
+      feedback.push('✓ Excellent depth and form');
+      feedback.push('✓ Knees tracking perfectly');
+    } else if (score >= 75) {
+      feedback.push('✓ Great squat form!');
+      feedback.push('✓ Good depth and positioning');
+      if (mistakes.length > 0 && !mistakes[0].includes('✓')) {
         feedback.push(mistakes[0]);
       }
+    } else if (score >= 60) {
+      feedback.push('Good effort - focus on:');
+      feedback.push(...mistakes.filter(m => !m.includes('✓')).slice(0, 2));
     } else {
-      feedback.push('Good effort:');
-      feedback.push(...mistakes.slice(0, 2));
+      feedback.push('Key corrections needed:');
+      feedback.push(...mistakes.filter(m => !m.includes('✓')).slice(0, 3));
     }
 
     return {
-      score: Math.max(0, score),
+      score: Math.max(0, Math.min(100, score)),
       isCorrect,
       feedback,
-      mistakes,
+      mistakes: mistakes.filter(m => !m.includes('✓')),
       color,
     };
   }
@@ -409,43 +703,79 @@ export class PoseDetectionService {
     const leftShoulder = this.getKeypoint(pose.keypoints, 'left_shoulder');
     const leftElbow = this.getKeypoint(pose.keypoints, 'left_elbow');
     const leftHip = this.getKeypoint(pose.keypoints, 'left_hip');
+    const leftWrist = this.getKeypoint(pose.keypoints, 'left_wrist');
+    const leftAnkle = this.getKeypoint(pose.keypoints, 'left_ankle');
 
-    const minConfidence = 0.15;
+    const minConfidence = 0.2;
     if (!leftShoulder || !leftElbow || !leftHip ||
         (leftShoulder.score && leftShoulder.score < minConfidence)) {
       return {
-        score: 75,
-        isCorrect: true,
-        feedback: ['✓ Good form! Keep pushing'],
-        mistakes: [],
-        color: 'green',
+        score: 60,
+        isCorrect: false,
+        feedback: ['Position yourself so your full body is visible from the side'],
+        mistakes: ['Body not fully visible'],
+        color: 'yellow',
       };
     }
 
-    // Very lenient body alignment
-    const bodyLine = Math.abs(leftShoulder.y - leftHip.y);
-    if (bodyLine > 60) {
-      mistakes.push('Engage core for straight body line');
-      score -= 10;
+    // 1. Check body alignment (straight line from shoulders to ankles)
+    if (leftAnkle) {
+      const shoulderAnkleDiff = Math.abs((leftShoulder.y - leftHip.y) - (leftHip.y - leftAnkle.y));
+      if (shoulderAnkleDiff > 40) {
+        mistakes.push('🔴 Hips sagging - engage your core!');
+        score -= 25;
+      } else if (shoulderAnkleDiff > 25) {
+        mistakes.push('🟡 Keep core tight for straight body line');
+        score -= 12;
+      }
     }
 
-    // Lenient elbow angle
-    const leftWrist = this.getKeypoint(pose.keypoints, 'left_wrist');
+    // 2. Check elbow depth (should bend to ~90 degrees)
     const elbowAngle = this.calculateAngle(leftShoulder, leftElbow, leftWrist);
-    if (elbowAngle && elbowAngle > 120) {
-      mistakes.push('Try going a bit lower');
-      score -= 8;
+    if (elbowAngle) {
+      if (elbowAngle > 140) {
+        mistakes.push('🔴 Go lower - bend elbows more!');
+        score -= 30;
+      } else if (elbowAngle > 110) {
+        mistakes.push('🟡 Try to go a bit lower');
+        score -= 15;
+      } else if (elbowAngle < 70) {
+        mistakes.push('🟡 Don\'t go too low');
+        score -= 10;
+      }
     }
 
-    score = Math.max(75, Math.min(100, score));
-    const isCorrect = score >= 70;
-    const color: 'green' | 'yellow' | 'red' = score >= 70 ? 'green' : score >= 60 ? 'yellow' : 'red';
+    // 3. Check elbow width (should be ~45 degrees from body)
+    const rightElbow = this.getKeypoint(pose.keypoints, 'right_elbow');
+    if (rightElbow) {
+      const elbowWidth = Math.abs(leftElbow.x - rightElbow.x);
+      const shoulderWidth = Math.abs(leftShoulder.x - this.getKeypoint(pose.keypoints, 'right_shoulder')!.x);
+      if (elbowWidth < shoulderWidth * 0.6) {
+        mistakes.push('🟡 Widen elbows slightly');
+        score -= 8;
+      }
+    }
+
+    const isCorrect = score >= 75;
+    const color: 'green' | 'yellow' | 'red' = score >= 80 ? 'green' : score >= 60 ? 'yellow' : 'red';
+
+    const feedback: string[] = [];
+    if (score >= 90) {
+      feedback.push('💪 Perfect push-up form!');
+      feedback.push('✓ Excellent body control');
+    } else if (score >= 75) {
+      feedback.push('✓ Great push-up!');
+      if (mistakes.length > 0 && !mistakes[0].includes('✓')) feedback.push(mistakes[0]);
+    } else {
+      feedback.push('Focus on:');
+      feedback.push(...mistakes.filter(m => !m.includes('✓')).slice(0, 2));
+    }
 
     return {
-      score,
+      score: Math.max(0, Math.min(100, score)),
       isCorrect,
-      feedback: isCorrect ? ['💪 Solid push-up!', '✓ Great form'] : ['Good effort:', ...mistakes],
-      mistakes,
+      feedback,
+      mistakes: mistakes.filter(m => !m.includes('✓')),
       color,
     };
   }

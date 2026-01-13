@@ -169,6 +169,18 @@ export const ChatbotCoachScreen: React.FC<{ navigation: any; route?: any }> = ({
     setInputText(prompt);
   };
 
+  // Safe navigation back handler
+  const handleSafeGoBack = () => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.reset({
+        index: 0,
+        routes: [{ name: 'MainTabs' }],
+      });
+    }
+  };
+
   useEffect(() => {
     // Auto-scroll to bottom when new messages arrive
     scrollViewRef.current?.scrollToEnd({ animated: true });
@@ -179,7 +191,7 @@ export const ChatbotCoachScreen: React.FC<{ navigation: any; route?: any }> = ({
       <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
 
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+        <TouchableOpacity onPress={handleSafeGoBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>

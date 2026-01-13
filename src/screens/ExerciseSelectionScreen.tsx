@@ -171,6 +171,18 @@ const ExerciseCard: React.FC<ExerciseCardProps> = ({ exercise, onPress }) => {
 };
 
 export const ExerciseSelectionScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
+  // Safe navigation back handler
+  const handleSafeGoBack = () => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.reset({
+        index: 0,
+        routes: [{ name: 'MainTabs' }],
+      });
+    }
+  };
+
   const handleExerciseSelect = (exercise: Exercise) => {
     navigation.navigate('LiveWorkout', {
       exercise: exercise.name,
@@ -183,7 +195,7 @@ export const ExerciseSelectionScreen: React.FC<{ navigation: any }> = ({ navigat
       <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
 
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+        <TouchableOpacity onPress={handleSafeGoBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Choose Exercise</Text>

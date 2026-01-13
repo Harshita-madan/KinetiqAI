@@ -45,6 +45,18 @@ export const SessionSummaryScreen: React.FC<{ navigation: any; route: any }> = (
 }) => {
   const { session } = route.params as { session: SessionData };
 
+  // Safe navigation back handler
+  const handleSafeGoBack = () => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.reset({
+        index: 0,
+        routes: [{ name: 'MainTabs' }],
+      });
+    }
+  };
+
   const formatDuration = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -93,7 +105,7 @@ export const SessionSummaryScreen: React.FC<{ navigation: any; route: any }> = (
       <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
 
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.closeButton}>
+        <TouchableOpacity onPress={handleSafeGoBack} style={styles.closeButton}>
           <Ionicons name="close" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Session Summary</Text>
