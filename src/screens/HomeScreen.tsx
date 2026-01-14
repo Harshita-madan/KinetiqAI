@@ -154,13 +154,6 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               color={colors.accent}
               onPress={() => navigation.navigate('History')}
             />
-            <FeatureCard
-              icon="shield-checkmark"
-              title="Privacy First"
-              description="No video storage - your data stays on device"
-              color={colors.info}
-              onPress={() => {}}
-            />
           </View>
         </View>
 

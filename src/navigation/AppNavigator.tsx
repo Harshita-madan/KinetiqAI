@@ -7,7 +7,6 @@ import { colors } from '../theme';
 import {
   HomeScreen,
   ChatScreen,
-  ExploreScreen,
   ProfileScreen,
   ExerciseSelectionScreen,
   LiveWorkoutScreen,
@@ -54,15 +53,6 @@ const MainTabs = () => {
         options={{
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="home" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tab.Screen
-        name="Explore"
-        component={ExploreScreen}
-        options={{
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="compass" size={size} color={color} />
           ),
         }}
       />
