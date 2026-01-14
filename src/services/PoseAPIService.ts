@@ -4,19 +4,42 @@
  */
 
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 
 // Configure the backend URL
-// For development:
-// - Web: localhost works directly
-// - Mobile: use your computer's IP address (the server must be accessible)
+// Automatically detects the development server IP for mobile devices
 const getBackendUrl = () => {
   if (Platform.OS === 'web') {
     return 'http://localhost:8000';
   }
+<<<<<<< HEAD
   // For mobile, use your computer's local IP
   // Replace with your actual IP address when testing on device
   // You can find it with `ipconfig` (Windows) or `ifconfig` (Mac/Linux)
   return 'http://192.168.0.105:8000'; // Update this IP for your network
+=======
+  
+  // For mobile: Auto-detect IP from Expo dev server
+  try {
+    // Get the Expo manifest URL which contains the dev server IP
+    const debuggerHost = Constants.expoConfig?.hostUri 
+      || Constants.manifest?.debuggerHost 
+      || Constants.manifest2?.extra?.expoClient?.hostUri;
+    
+    if (debuggerHost) {
+      // Extract IP address (format is usually "192.168.x.x:19000" or similar)
+      const ip = debuggerHost.split(':')[0];
+      console.log(`🌐 Auto-detected backend IP: ${ip}:8000`);
+      return `http://${ip}:8000`;
+    }
+  } catch (error) {
+    console.warn('Could not auto-detect IP:', error);
+  }
+  
+  // Fallback to localhost (won't work on physical devices)
+  console.warn('⚠️ Using localhost fallback - update IP manually if on physical device');
+  return 'http://localhost:8000';
+>>>>>>> 0ee4cc36df103b6a49a29c1e2b2c2e509b8c8c23
 };
 
 const BACKEND_URL = getBackendUrl();
