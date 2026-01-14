@@ -2,6 +2,8 @@ import { StyleSheet } from 'react-native';
 import { colors } from './colors';
 
 export { colors };
+export { ThemeProvider, useTheme, lightColors, darkColors } from './ThemeContext';
+export type { ThemeColors } from './ThemeContext';
 
 export const spacing = {
   xs: 4,

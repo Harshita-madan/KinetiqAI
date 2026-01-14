@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, ViewStyle } from 'react-native';
-import { colors, spacing, borderRadius, fontSize, fontWeight, shadows } from '../theme';
+import { spacing, borderRadius, fontSize, fontWeight, useTheme } from '../theme';
 
 interface CardProps {
   children: React.ReactNode;
@@ -17,12 +17,35 @@ export const Card: React.FC<CardProps> = ({
   style,
   variant = 'default',
 }) => {
+  const { colors } = useTheme();
+  
+  const variantStyles = {
+    default: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.05,
+      shadowRadius: 2,
+      elevation: 1,
+    },
+    elevated: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.15,
+      shadowRadius: 8,
+      elevation: 4,
+    },
+    outlined: {
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+  };
+  
   return (
-    <View style={[styles.container, styles[variant], style]}>
+    <View style={[styles.container, { backgroundColor: colors.surface }, variantStyles[variant], style]}>
       {(title || subtitle) && (
-        <View style={styles.header}>
-          {title && <Text style={styles.title}>{title}</Text>}
-          {subtitle && <Text style={styles.subtitle}>{subtitle}</Text>}
+        <View style={[styles.header, { borderBottomColor: colors.borderLight }]}>
+          {title && <Text style={[styles.title, { color: colors.textPrimary }]}>{title}</Text>}
+          {subtitle && <Text style={[styles.subtitle, { color: colors.textSecondary }]}>{subtitle}</Text>}
         </View>
       )}
       <View style={styles.content}>{children}</View>
@@ -32,34 +55,20 @@ export const Card: React.FC<CardProps> = ({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: colors.surface,
     borderRadius: borderRadius.xl,
     overflow: 'hidden',
-  },
-  default: {
-    ...shadows.sm,
-  },
-  elevated: {
-    ...shadows.lg,
-  },
-  outlined: {
-    borderWidth: 1,
-    borderColor: colors.border,
   },
   header: {
     padding: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.borderLight,
   },
   title: {
     fontSize: fontSize.lg,
     fontWeight: fontWeight.semibold,
-    color: colors.textPrimary,
     marginBottom: spacing.xs,
   },
   subtitle: {
     fontSize: fontSize.sm,
-    color: colors.textSecondary,
   },
   content: {
     padding: spacing.md,

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,8 +10,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing, borderRadius, fontSize, fontWeight, shadows } from '../theme';
+import { useFocusEffect } from '@react-navigation/native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
+import * as ImagePicker from 'expo-image-picker';
+import { spacing, borderRadius, fontSize, fontWeight, useTheme, ThemeColors } from '../theme';
 import { Avatar, Button } from '../components';
+import { NotificationService } from '../services';
+
+const PROFILE_STORAGE_KEY = '@kinetiqai_profile';
 
 interface SettingItemProps {
   icon: keyof typeof Ionicons.glyphMap;
@@ -20,6 +27,7 @@ interface SettingItemProps {
   onPress?: () => void;
   rightElement?: React.ReactNode;
   showArrow?: boolean;
+  colors: ThemeColors;
 }
 
 const SettingItem: React.FC<SettingItemProps> = ({
@@ -29,19 +37,20 @@ const SettingItem: React.FC<SettingItemProps> = ({
   onPress,
   rightElement,
   showArrow = true,
+  colors,
 }) => (
   <TouchableOpacity
-    style={styles.settingItem}
+    style={[styles.settingItem, { borderBottomColor: colors.borderLight }]}
     onPress={onPress}
     activeOpacity={onPress ? 0.7 : 1}
     disabled={!onPress && !rightElement}
   >
-    <View style={styles.settingIconContainer}>
+    <View style={[styles.settingIconContainer, { backgroundColor: colors.primary + '15' }]}>
       <Ionicons name={icon} size={22} color={colors.primary} />
     </View>
     <View style={styles.settingContent}>
-      <Text style={styles.settingTitle}>{title}</Text>
-      {subtitle && <Text style={styles.settingSubtitle}>{subtitle}</Text>}
+      <Text style={[styles.settingTitle, { color: colors.textPrimary }]}>{title}</Text>
+      {subtitle && <Text style={[styles.settingSubtitle, { color: colors.textSecondary }]}>{subtitle}</Text>}
     </View>
     {rightElement ? (
       rightElement
@@ -54,100 +63,295 @@ const SettingItem: React.FC<SettingItemProps> = ({
 interface SettingSectionProps {
   title: string;
   children: React.ReactNode;
+  colors: ThemeColors;
 }
 
-const SettingSection: React.FC<SettingSectionProps> = ({ title, children }) => (
+const SettingSection: React.FC<SettingSectionProps> = ({ title, children, colors }) => (
   <View style={styles.section}>
-    <Text style={styles.sectionTitle}>{title}</Text>
-    <View style={styles.sectionContent}>{children}</View>
+    <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>{title}</Text>
+    <View style={[styles.sectionContent, { backgroundColor: colors.cardBg }]}>{children}</View>
   </View>
 );
 
 export const ProfileScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
+  const { colors, isDarkMode, setDarkMode } = useTheme();
   const [notifications, setNotifications] = useState(true);
-  const [darkMode, setDarkMode] = useState(false);
-  const [haptics, setHaptics] = useState(true);
-  const [voiceAssist, setVoiceAssist] = useState(true);
+  const [profileImage, setProfileImage] = useState<string | null>(null);
+  const [profile, setProfile] = useState({
+    name: 'User',
+    email: 'user@example.com',
+    phone: '',
+    bio: '',
+  });
 
-  const handleLogout = () => {
-    Alert.alert('Logout', 'Are you sure you want to logout?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Logout', style: 'destructive', onPress: () => {} },
-    ]);
+  // Load profile data and notification settings when screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      loadProfile();
+      loadNotificationSettings();
+    }, [])
+  );
+
+  const loadNotificationSettings = async () => {
+    try {
+      const isEnabled = await NotificationService.areNotificationsEnabled();
+      setNotifications(isEnabled);
+    } catch (error) {
+      console.log('Error loading notification settings:', error);
+    }
+  };
+
+  const handleNotificationToggle = async (enabled: boolean) => {
+    setNotifications(enabled);
+    await NotificationService.setNotificationsEnabled(enabled);
+    
+    if (enabled) {
+      // Request permissions and schedule notifications
+      const hasPermission = await NotificationService.requestPermissions();
+      if (hasPermission) {
+        Alert.alert(
+          'Notifications Enabled ✓',
+          'You will receive gentle posture reminders and wellness tips throughout the day.',
+          [{ text: 'Great!' }]
+        );
+      } else {
+        Alert.alert(
+          'Permission Needed',
+          'Please allow notifications in your device settings to receive reminders.',
+          [{ text: 'OK' }]
+        );
+        setNotifications(false);
+      }
+    }
+  };
+
+  const handleTestNotification = async () => {
+    try {
+      const hasPermission = await NotificationService.requestPermissions();
+      console.log('Permission granted:', hasPermission);
+      
+      if (!hasPermission) {
+        Alert.alert(
+          'Permission Required',
+          'Please enable notifications in your device settings.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      
+      // Schedule notification with proper trigger format for SDK 53+
+      const notificationId = await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Posture Check! 🧘',
+          body: 'Just a gentle reminder to check your posture and take a stretch break!',
+          sound: true,
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+          seconds: 2,
+        },
+      });
+      
+      console.log('Notification scheduled with ID:', notificationId);
+      
+      Alert.alert(
+        'Test Notification Scheduled',
+        'A notification will appear in 2 seconds! Minimize the app to see it.',
+        [{ text: 'OK' }]
+      );
+    } catch (error) {
+      console.log('Error scheduling notification:', error);
+      Alert.alert('Error', `Failed to schedule notification: ${error}`);
+    }
+  };
+
+  const loadProfile = async () => {
+    try {
+      const savedProfile = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
+      if (savedProfile) {
+        setProfile(JSON.parse(savedProfile));
+      }
+      const savedImage = await AsyncStorage.getItem('@kinetiqai_profile_image');
+      if (savedImage) {
+        setProfileImage(savedImage);
+      }
+    } catch (error) {
+      console.log('Error loading profile:', error);
+    }
+  };
+
+  const handleChangePhoto = async () => {
+    try {
+      // Request permissions
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission Required',
+          'Please allow access to your photo library to change your profile picture.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
+      // Show action sheet for photo options
+      Alert.alert(
+        'Change Profile Picture',
+        'Choose an option',
+        [
+          {
+            text: 'Take Photo',
+            onPress: async () => {
+              const cameraStatus = await ImagePicker.requestCameraPermissionsAsync();
+              if (cameraStatus.status !== 'granted') {
+                Alert.alert('Permission Required', 'Camera access is needed to take photos.');
+                return;
+              }
+              const result = await ImagePicker.launchCameraAsync({
+                mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                allowsEditing: true,
+                aspect: [1, 1],
+                quality: 0.8,
+              });
+              if (!result.canceled && result.assets[0]) {
+                const imageUri = result.assets[0].uri;
+                setProfileImage(imageUri);
+                await AsyncStorage.setItem('@kinetiqai_profile_image', imageUri);
+              }
+            },
+          },
+          {
+            text: 'Choose from Library',
+            onPress: async () => {
+              const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                allowsEditing: true,
+                aspect: [1, 1],
+                quality: 0.8,
+              });
+              if (!result.canceled && result.assets[0]) {
+                const imageUri = result.assets[0].uri;
+                setProfileImage(imageUri);
+                await AsyncStorage.setItem('@kinetiqai_profile_image', imageUri);
+              }
+            },
+          },
+          profileImage ? {
+            text: 'Remove Photo',
+            style: 'destructive',
+            onPress: async () => {
+              setProfileImage(null);
+              await AsyncStorage.removeItem('@kinetiqai_profile_image');
+            },
+          } : null,
+          {
+            text: 'Cancel',
+            style: 'cancel',
+          },
+        ].filter(Boolean) as any
+      );
+    } catch (error) {
+      console.log('Error changing photo:', error);
+      Alert.alert('Error', 'Failed to change profile picture. Please try again.');
+    }
+  };
+
+  const handleHelpCenter = () => {
+    Alert.alert(
+      'Frequently Asked Questions',
+      '\n❓ How do I start a workout?\nGo to Explore, select an exercise, and tap "Start Workout".\n\n❓ How accurate is pose detection?\nOur AI provides real-time feedback with high accuracy using your camera.\n\n❓ Can I track my progress?\nYes! Check the History section to view your workout logs and statistics.\n\n❓ What exercises are available?\nWe offer squats, push-ups, planks, and more. New exercises added regularly!\n\n❓ Do I need equipment?\nNo equipment needed! Just your device camera and some space.',
+      [{ text: 'Got it!' }]
+    );
+  };
+
+  const handleContactUs = () => {
+    Alert.alert(
+      'Contact Us',
+      '\n📧 Email: support@kinetiqai.com\n\n💬 We typically respond within 24 hours\n\nFeel free to reach out for:\n• Technical support\n• Feature requests\n• Feedback and suggestions\n• General inquiries\n\nWe\'re here to help you on your fitness journey!',
+      [{ text: 'Close' }]
+    );
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
         {/* Profile Header */}
-        <View style={styles.profileHeader}>
-          <TouchableOpacity style={styles.avatarContainer}>
-            <Avatar name="User" size="xl" />
-            <View style={styles.editBadge}>
+        <View style={[styles.profileHeader, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
+          <TouchableOpacity 
+            style={styles.avatarContainer}
+            onPress={handleChangePhoto}
+          >
+            <Avatar 
+              name={profile.name || 'User'} 
+              size="xl" 
+              source={profileImage || undefined}
+            />
+            <View style={[styles.editBadge, { backgroundColor: colors.primary, borderColor: colors.surface }]}>
               <Ionicons name="camera" size={14} color={colors.white} />
             </View>
           </TouchableOpacity>
-          <Text style={styles.profileName}>User</Text>
-          <Text style={styles.profileEmail}>user@example.com</Text>
-          <View style={styles.statsContainer}>
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>12</Text>
-              <Text style={styles.statLabel}>Sessions</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>48</Text>
-              <Text style={styles.statLabel}>Queries</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>3h</Text>
-              <Text style={styles.statLabel}>Time Saved</Text>
-            </View>
-          </View>
+          <Text style={[styles.profileName, { color: colors.textPrimary }]}>{profile.name || 'User'}</Text>
+          <Text style={[styles.profileEmail, { color: colors.textSecondary }]}>{profile.email || 'user@example.com'}</Text>
+          {profile.bio ? (
+            <Text style={[styles.profileBio, { color: colors.textSecondary }]}>{profile.bio}</Text>
+          ) : null}
         </View>
 
         {/* Account Settings */}
-        <SettingSection title="Account">
+        <SettingSection title="Account" colors={colors}>
           <SettingItem
             icon="person-outline"
             title="Edit Profile"
             subtitle="Update your personal information"
-            onPress={() => {}}
+            onPress={() => navigation.navigate('EditProfile')}
+            colors={colors}
           />
           <SettingItem
             icon="shield-checkmark-outline"
             title="Privacy & Security"
-            subtitle="Manage your data and permissions"
-            onPress={() => {}}
+            onPress={() => Alert.alert(
+              'Privacy & Security',
+              'Your data is protected with industry-standard encryption. We do not share your personal information with third parties. All workout data is stored securely on your device. You can delete your data at any time from the app settings.',
+              [{ text: 'OK' }]
+            )}
+            colors={colors}
           />
           <SettingItem
             icon="card-outline"
             title="Subscription"
             subtitle="Free Plan"
-            onPress={() => {}}
+            showArrow={false}
+            colors={colors}
           />
         </SettingSection>
 
         {/* Preferences */}
-        <SettingSection title="Preferences">
+        <SettingSection title="Preferences" colors={colors}>
           <SettingItem
             icon="notifications-outline"
             title="Notifications"
-            subtitle="Receive push notifications"
+            subtitle="Posture reminders & wellness tips"
             rightElement={
               <Switch
                 value={notifications}
-                onValueChange={setNotifications}
+                onValueChange={handleNotificationToggle}
                 trackColor={{ false: colors.gray300, true: colors.primaryLight }}
                 thumbColor={notifications ? colors.primary : colors.gray100}
               />
             }
             showArrow={false}
+            colors={colors}
+          />
+          <SettingItem
+            icon="paper-plane-outline"
+            title="Test Notification"
+            subtitle="Send a test notification in 3 seconds"
+            onPress={handleTestNotification}
+            colors={colors}
           />
           <SettingItem
             icon="moon-outline"
@@ -155,117 +359,45 @@ export const ProfileScreen: React.FC<{ navigation: any }> = ({ navigation }) => 
             subtitle="Use dark theme"
             rightElement={
               <Switch
-                value={darkMode}
+                value={isDarkMode}
                 onValueChange={setDarkMode}
                 trackColor={{ false: colors.gray300, true: colors.primaryLight }}
-                thumbColor={darkMode ? colors.primary : colors.gray100}
+                thumbColor={isDarkMode ? colors.primary : colors.gray100}
               />
             }
             showArrow={false}
-          />
-          <SettingItem
-            icon="phone-portrait-outline"
-            title="Haptic Feedback"
-            subtitle="Vibration on interactions"
-            rightElement={
-              <Switch
-                value={haptics}
-                onValueChange={setHaptics}
-                trackColor={{ false: colors.gray300, true: colors.primaryLight }}
-                thumbColor={haptics ? colors.primary : colors.gray100}
-              />
-            }
-            showArrow={false}
-          />
-        </SettingSection>
-
-        {/* Accessibility */}
-        <SettingSection title="Accessibility">
-          <SettingItem
-            icon="mic-outline"
-            title="Voice Assistant"
-            subtitle="Enable voice commands"
-            rightElement={
-              <Switch
-                value={voiceAssist}
-                onValueChange={setVoiceAssist}
-                trackColor={{ false: colors.gray300, true: colors.primaryLight }}
-                thumbColor={voiceAssist ? colors.primary : colors.gray100}
-              />
-            }
-            showArrow={false}
-          />
-          <SettingItem
-            icon="text-outline"
-            title="Text Size"
-            subtitle="Adjust font size"
-            onPress={() => {}}
-          />
-          <SettingItem
-            icon="contrast-outline"
-            title="High Contrast"
-            subtitle="Increase color contrast"
-            onPress={() => {}}
+            colors={colors}
           />
         </SettingSection>
 
         {/* Support */}
-        <SettingSection title="Support">
+        <SettingSection title="Support" colors={colors}>
           <SettingItem
             icon="help-circle-outline"
             title="Help Center"
-            subtitle="FAQs and tutorials"
-            onPress={() => {}}
+            subtitle="FAQs"
+            onPress={handleHelpCenter}
+            colors={colors}
           />
           <SettingItem
             icon="chatbox-outline"
             title="Contact Us"
             subtitle="Get in touch with support"
-            onPress={() => {}}
-          />
-          <SettingItem
-            icon="document-text-outline"
-            title="Terms of Service"
-            onPress={() => {}}
-          />
-          <SettingItem
-            icon="lock-closed-outline"
-            title="Privacy Policy"
-            onPress={() => {}}
+            onPress={handleContactUs}
+            colors={colors}
           />
         </SettingSection>
 
         {/* App Info */}
-        <SettingSection title="About">
+        <SettingSection title="About" colors={colors}>
           <SettingItem
             icon="information-circle-outline"
             title="App Version"
             subtitle="1.0.0 (Build 1)"
             showArrow={false}
-          />
-          <SettingItem
-            icon="star-outline"
-            title="Rate App"
-            subtitle="Leave a review"
-            onPress={() => {}}
+            colors={colors}
           />
         </SettingSection>
-
-        {/* Logout Button */}
-        <View style={styles.logoutContainer}>
-          <Button
-            title="Logout"
-            onPress={handleLogout}
-            variant="outline"
-            icon={<Ionicons name="log-out-outline" size={20} color={colors.error} />}
-            textStyle={{ color: colors.error }}
-            style={{ borderColor: colors.error }}
-          />
-        </View>
-
-        <Text style={styles.footer}>
-          Made with ❤️ for BrainWave DTU Hackathon
-        </Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -274,7 +406,6 @@ export const ProfileScreen: React.FC<{ navigation: any }> = ({ navigation }) => 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.background,
   },
   scrollView: {
     flex: 1,
@@ -285,9 +416,7 @@ const styles = StyleSheet.create({
   profileHeader: {
     alignItems: 'center',
     paddingVertical: spacing.xl,
-    backgroundColor: colors.white,
     borderBottomWidth: 1,
-    borderBottomColor: colors.border,
   },
   avatarContainer: {
     position: 'relative',
@@ -297,49 +426,27 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 0,
     right: 0,
-    backgroundColor: colors.primary,
     width: 28,
     height: 28,
     borderRadius: borderRadius.full,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
-    borderColor: colors.white,
   },
   profileName: {
     fontSize: fontSize.xl,
     fontWeight: fontWeight.bold,
-    color: colors.textPrimary,
     marginBottom: spacing.xs,
   },
   profileEmail: {
     fontSize: fontSize.sm,
-    color: colors.textSecondary,
-    marginBottom: spacing.lg,
+    marginBottom: spacing.sm,
   },
-  statsContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  profileBio: {
+    fontSize: fontSize.sm,
+    textAlign: 'center',
     paddingHorizontal: spacing.xl,
-  },
-  statItem: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  statValue: {
-    fontSize: fontSize.xxl,
-    fontWeight: fontWeight.bold,
-    color: colors.primary,
-  },
-  statLabel: {
-    fontSize: fontSize.xs,
-    color: colors.textSecondary,
-    marginTop: spacing.xs,
-  },
-  statDivider: {
-    width: 1,
-    height: 40,
-    backgroundColor: colors.border,
+    marginBottom: spacing.md,
   },
   section: {
     marginTop: spacing.lg,
@@ -348,30 +455,30 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: fontSize.sm,
     fontWeight: fontWeight.semibold,
-    color: colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: spacing.sm,
     marginLeft: spacing.xs,
   },
   sectionContent: {
-    backgroundColor: colors.white,
     borderRadius: borderRadius.lg,
     overflow: 'hidden',
-    ...shadows.sm,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
   settingItem: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.borderLight,
   },
   settingIconContainer: {
     width: 40,
     height: 40,
     borderRadius: borderRadius.md,
-    backgroundColor: colors.primary + '10',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: spacing.md,
@@ -382,22 +489,14 @@ const styles = StyleSheet.create({
   settingTitle: {
     fontSize: fontSize.md,
     fontWeight: fontWeight.medium,
-    color: colors.textPrimary,
   },
   settingSubtitle: {
     fontSize: fontSize.xs,
-    color: colors.textSecondary,
     marginTop: spacing.xs,
   },
   logoutContainer: {
     paddingHorizontal: spacing.md,
     marginTop: spacing.xl,
-  },
-  footer: {
-    textAlign: 'center',
-    fontSize: fontSize.sm,
-    color: colors.textMuted,
-    marginTop: spacing.xl,
-    paddingBottom: spacing.lg,
+    marginBottom: spacing.xl,
   },
 });

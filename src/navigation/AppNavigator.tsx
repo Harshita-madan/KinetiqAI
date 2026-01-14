@@ -1,14 +1,15 @@
 import React from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
-import { colors } from '../theme';
+import { useTheme } from '../theme';
 import {
   HomeScreen,
   ChatScreen,
   ExploreScreen,
   ProfileScreen,
+  EditProfileScreen,
   ExerciseSelectionScreen,
   LiveWorkoutScreen,
   SessionSummaryScreen,
@@ -23,6 +24,7 @@ export type RootStackParamList = {
   SessionSummary: { session: any };
   History: undefined;
   ChatbotCoach: { session?: any };
+  EditProfile: undefined;
 };
 
 export type MainTabParamList = {
@@ -36,6 +38,8 @@ const Tab = createBottomTabNavigator<MainTabParamList>();
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 const MainTabs = () => {
+  const { colors } = useTheme();
+  
   return (
     <Tab.Navigator
       screenOptions={{
@@ -43,7 +47,7 @@ const MainTabs = () => {
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.gray400,
         tabBarStyle: {
-          backgroundColor: colors.background,
+          backgroundColor: colors.surface,
           borderTopColor: colors.border,
         },
       }}
@@ -89,8 +93,23 @@ const MainTabs = () => {
 };
 
 export const AppNavigator: React.FC = () => {
+  const { colors, isDarkMode } = useTheme();
+  
+  const customTheme = {
+    ...(isDarkMode ? DarkTheme : DefaultTheme),
+    colors: {
+      ...(isDarkMode ? DarkTheme.colors : DefaultTheme.colors),
+      primary: colors.primary,
+      background: colors.background,
+      card: colors.surface,
+      text: colors.textPrimary,
+      border: colors.border,
+      notification: colors.primary,
+    },
+  };
+  
   return (
-    <NavigationContainer>
+    <NavigationContainer theme={customTheme}>
       <Stack.Navigator
         screenOptions={{
           headerShown: false,
@@ -102,6 +121,7 @@ export const AppNavigator: React.FC = () => {
         <Stack.Screen name="SessionSummary" component={SessionSummaryScreen} />
         <Stack.Screen name="History" component={HistoryScreen} />
         <Stack.Screen name="ChatbotCoach" component={ChatbotCoachScreen} />
+        <Stack.Screen name="EditProfile" component={EditProfileScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

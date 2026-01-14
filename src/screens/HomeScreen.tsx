@@ -10,7 +10,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { colors, spacing, borderRadius, fontSize, fontWeight, shadows } from '../theme';
+import { spacing, borderRadius, fontSize, fontWeight, useTheme, ThemeColors } from '../theme';
 import { Card, Avatar, Button } from '../components';
 
 interface QuickActionProps {
@@ -18,14 +18,15 @@ interface QuickActionProps {
   title: string;
   color: string;
   onPress: () => void;
+  colors: ThemeColors;
 }
 
-const QuickAction: React.FC<QuickActionProps> = ({ icon, title, color, onPress }) => (
+const QuickAction: React.FC<QuickActionProps> = ({ icon, title, color, onPress, colors }) => (
   <TouchableOpacity style={styles.quickAction} onPress={onPress} activeOpacity={0.7}>
     <View style={[styles.quickActionIcon, { backgroundColor: color + '20' }]}>
       <Ionicons name={icon} size={24} color={color} />
     </View>
-    <Text style={styles.quickActionText}>{title}</Text>
+    <Text style={[styles.quickActionText, { color: colors.textSecondary }]}>{title}</Text>
   </TouchableOpacity>
 );
 
@@ -35,27 +36,29 @@ interface FeatureCardProps {
   description: string;
   color: string;
   onPress: () => void;
+  colors: ThemeColors;
 }
 
-const FeatureCard: React.FC<FeatureCardProps> = ({ icon, title, description, color, onPress }) => (
-  <TouchableOpacity style={styles.featureCard} onPress={onPress} activeOpacity={0.8}>
+const FeatureCard: React.FC<FeatureCardProps> = ({ icon, title, description, color, onPress, colors }) => (
+  <TouchableOpacity style={[styles.featureCard, { backgroundColor: colors.surface }]} onPress={onPress} activeOpacity={0.8}>
     <View style={[styles.featureIconContainer, { backgroundColor: color + '15' }]}>
       <Ionicons name={icon} size={28} color={color} />
     </View>
     <View style={styles.featureContent}>
-      <Text style={styles.featureTitle}>{title}</Text>
-      <Text style={styles.featureDescription}>{description}</Text>
+      <Text style={[styles.featureTitle, { color: colors.textPrimary }]}>{title}</Text>
+      <Text style={[styles.featureDescription, { color: colors.textSecondary }]}>{description}</Text>
     </View>
     <Ionicons name="chevron-forward" size={20} color={colors.gray400} />
   </TouchableOpacity>
 );
 
 export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
+  const { colors, isDarkMode } = useTheme();
   const userName = 'User';
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
+    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
+      <StatusBar barStyle={isDarkMode ? "light-content" : "dark-content"} backgroundColor={colors.background} />
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
@@ -64,8 +67,8 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <Text style={styles.greeting}>Hello,</Text>
-            <Text style={styles.userName}>{userName} 👋</Text>
+            <Text style={[styles.greeting, { color: colors.textSecondary }]}>Hello,</Text>
+            <Text style={[styles.userName, { color: colors.textPrimary }]}>{userName} 👋</Text>
           </View>
           <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
             <Avatar name={userName} size="md" showBadge badgeColor={colors.success} />
@@ -100,38 +103,42 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
         {/* Quick Actions */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
+          <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Quick Actions</Text>
           <View style={styles.quickActionsGrid}>
             <QuickAction
               icon="fitness"
               title="Workout"
               color={colors.primary}
               onPress={() => navigation.navigate('ExerciseSelection')}
+              colors={colors}
             />
             <QuickAction
               icon="chatbubble-ellipses"
               title="AI Coach"
               color={colors.secondary}
               onPress={() => navigation.navigate('ChatbotCoach')}
+              colors={colors}
             />
             <QuickAction
               icon="time"
               title="History"
               color={colors.accent}
               onPress={() => navigation.navigate('History')}
+              colors={colors}
             />
             <QuickAction
               icon="analytics"
               title="Stats"
               color={colors.info}
               onPress={() => navigation.navigate('History')}
+              colors={colors}
             />
           </View>
         </View>
 
         {/* Features */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Features</Text>
+          <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Features</Text>
           <View style={styles.featuresContainer}>
             <FeatureCard
               icon="camera"
@@ -139,6 +146,7 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               description="Real-time AI posture correction with skeleton overlay"
               color={colors.primary}
               onPress={() => navigation.navigate('ExerciseSelection')}
+              colors={colors}
             />
             <FeatureCard
               icon="chatbubbles"
@@ -146,6 +154,7 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               description="Get personalized fitness advice anytime"
               color={colors.secondary}
               onPress={() => navigation.navigate('ChatbotCoach')}
+              colors={colors}
             />
             <FeatureCard
               icon="bar-chart"
@@ -153,6 +162,7 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               description="Track progress and view past workout sessions"
               color={colors.accent}
               onPress={() => navigation.navigate('History')}
+              colors={colors}
             />
             <FeatureCard
               icon="shield-checkmark"
@@ -160,22 +170,23 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               description="No video storage - your data stays on device"
               color={colors.info}
               onPress={() => {}}
+              colors={colors}
             />
           </View>
         </View>
 
         {/* Recent Activity */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Get Started</Text>
+          <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Get Started</Text>
           <Card variant="outlined">
             <View style={styles.emptyState}>
               <Ionicons name="barbell-outline" size={48} color={colors.primary} />
-              <Text style={styles.emptyStateText}>Ready to improve your form?</Text>
-              <Text style={styles.emptyStateSubtext}>
+              <Text style={[styles.emptyStateText, { color: colors.textPrimary }]}>Ready to improve your form?</Text>
+              <Text style={[styles.emptyStateSubtext, { color: colors.textSecondary }]}>
                 Start your first workout with AI-powered posture correction
               </Text>
               <TouchableOpacity 
-                style={styles.startWorkoutButton}
+                style={[styles.startWorkoutButton, { backgroundColor: colors.primary }]}
                 onPress={() => navigation.navigate('ExerciseSelection')}
               >
                 <Text style={styles.startWorkoutButtonText}>Start Workout</Text>
@@ -191,7 +202,6 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.background,
   },
   scrollView: {
     flex: 1,
@@ -211,12 +221,10 @@ const styles = StyleSheet.create({
   },
   greeting: {
     fontSize: fontSize.md,
-    color: colors.textSecondary,
   },
   userName: {
     fontSize: fontSize.xxl,
     fontWeight: fontWeight.bold,
-    color: colors.textPrimary,
   },
   heroCard: {
     borderRadius: borderRadius.xl,
@@ -224,7 +232,11 @@ const styles = StyleSheet.create({
     marginBottom: spacing.lg,
     flexDirection: 'row',
     overflow: 'hidden',
-    ...shadows.lg,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 4,
   },
   heroContent: {
     flex: 1,
@@ -233,7 +245,7 @@ const styles = StyleSheet.create({
   heroTitle: {
     fontSize: fontSize.xl,
     fontWeight: fontWeight.bold,
-    color: colors.white,
+    color: '#FFFFFF',
     marginBottom: spacing.xs,
   },
   heroSubtitle: {
@@ -256,7 +268,6 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: fontSize.lg,
     fontWeight: fontWeight.semibold,
-    color: colors.textPrimary,
     marginBottom: spacing.md,
   },
   quickActionsGrid: {
@@ -277,7 +288,6 @@ const styles = StyleSheet.create({
   },
   quickActionText: {
     fontSize: fontSize.xs,
-    color: colors.textSecondary,
     fontWeight: fontWeight.medium,
   },
   featuresContainer: {
@@ -286,10 +296,13 @@ const styles = StyleSheet.create({
   featureCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.surface,
     borderRadius: borderRadius.lg,
     padding: spacing.md,
-    ...shadows.sm,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
   featureIconContainer: {
     width: 48,
@@ -305,12 +318,10 @@ const styles = StyleSheet.create({
   featureTitle: {
     fontSize: fontSize.md,
     fontWeight: fontWeight.semibold,
-    color: colors.textPrimary,
     marginBottom: spacing.xs,
   },
   featureDescription: {
     fontSize: fontSize.xs,
-    color: colors.textSecondary,
   },
   emptyState: {
     alignItems: 'center',
@@ -319,12 +330,10 @@ const styles = StyleSheet.create({
   emptyStateText: {
     fontSize: fontSize.md,
     fontWeight: fontWeight.medium,
-    color: colors.textPrimary,
     marginTop: spacing.md,
   },
   emptyStateSubtext: {
     fontSize: fontSize.sm,
-    color: colors.textSecondary,
     textAlign: 'center',
     marginTop: spacing.xs,
   },
@@ -332,12 +341,11 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.xl,
-    backgroundColor: colors.primary,
     borderRadius: borderRadius.lg,
   },
   startWorkoutButtonText: {
     fontSize: fontSize.md,
     fontWeight: fontWeight.semibold,
-    color: colors.white,
+    color: '#FFFFFF',
   },
 });
