@@ -4,3 +4,4 @@ export { poseAPIService } from './PoseAPIService';
 export { NotificationService } from './NotificationService';
 export type { Pose, Keypoint, PostureAnalysis } from './PoseDetectionService';
 export type { SessionData } from './StorageService';
+export type { ChatMessage } from './OnDemandChatbotService';

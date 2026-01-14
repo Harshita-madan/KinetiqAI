@@ -7,7 +7,6 @@ import { useTheme } from '../theme';
 import {
   HomeScreen,
   ChatScreen,
-  ExploreScreen,
   ProfileScreen,
   EditProfileScreen,
   ExerciseSelectionScreen,
@@ -58,15 +57,6 @@ const MainTabs = () => {
         options={{
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="home" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tab.Screen
-        name="Explore"
-        component={ExploreScreen}
-        options={{
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="compass" size={size} color={color} />
           ),
         }}
       />
