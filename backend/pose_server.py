@@ -64,13 +64,19 @@ KEYPOINT_NAMES = [
     'left_foot_index', 'right_foot_index'
 ]
 
-# Map MediaPipe landmarks to simplified keypoint names (Full model with 33 keypoints)
+# Map MediaPipe landmarks to simplified keypoint names (Full model with ALL 33 keypoints)
 SIMPLIFIED_KEYPOINTS = {
     0: 'nose',
+    1: 'left_eye_inner',
     2: 'left_eye',
-    5: 'right_eye', 
+    3: 'left_eye_outer',
+    4: 'right_eye_inner',
+    5: 'right_eye',
+    6: 'right_eye_outer',
     7: 'left_ear',
     8: 'right_ear',
+    9: 'mouth_left',
+    10: 'mouth_right',
     11: 'left_shoulder',
     12: 'right_shoulder',
     13: 'left_elbow',
@@ -206,7 +212,7 @@ def get_keypoint(keypoints: List[Keypoint], name: str) -> Optional[Keypoint]:
 
 
 def analyze_squat(keypoints: List[Keypoint]) -> PostureAnalysis:
-    """Analyze squat form with enhanced criteria."""
+    """Analyze squat form with enhanced bilateral criteria."""
     score = 100
     mistakes = []
     feedback = []
@@ -218,10 +224,13 @@ def analyze_squat(keypoints: List[Keypoint]) -> PostureAnalysis:
     right_hip = get_keypoint(keypoints, 'right_hip')
     right_knee = get_keypoint(keypoints, 'right_knee')
     right_ankle = get_keypoint(keypoints, 'right_ankle')
+    right_shoulder = get_keypoint(keypoints, 'right_shoulder')
     
-    if left_hip and left_knee and left_ankle:
-        # Enhanced knee angle analysis (optimal range: 80-100 degrees)
-        knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+    # Use bilateral averaging for more accurate assessment
+    if left_hip and left_knee and left_ankle and right_hip and right_knee and right_ankle:
+        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
+        knee_angle = (left_knee_angle + right_knee_angle) / 2  # Bilateral average
         
         if knee_angle > 165:
             feedback.append("Begin lowering into squat position")
@@ -294,7 +303,7 @@ def analyze_squat(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
-    """Analyze plank form."""
+    """Analyze plank form with bilateral assessment."""
     score = 100
     mistakes = []
     feedback = []
@@ -303,6 +312,9 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
     left_hip = get_keypoint(keypoints, 'left_hip')
     left_ankle = get_keypoint(keypoints, 'left_ankle')
     left_elbow = get_keypoint(keypoints, 'left_elbow')
+    right_shoulder = get_keypoint(keypoints, 'right_shoulder')
+    right_hip = get_keypoint(keypoints, 'right_hip')
+    right_ankle = get_keypoint(keypoints, 'right_ankle')
     
     if left_shoulder and left_hip and left_ankle:
         # Check body alignment (should be straight line)
@@ -326,6 +338,14 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
             mistakes.append("🟡 Keep elbows directly under shoulders")
             score -= 15
     
+    # Check bilateral symmetry
+    if left_shoulder and right_shoulder and left_hip and right_hip:
+        shoulder_diff = abs(left_shoulder.y - right_shoulder.y)
+        hip_diff = abs(left_hip.y - right_hip.y)
+        if shoulder_diff > 0.08 or hip_diff > 0.08:
+            mistakes.append("🟡 Keep body level - one side is higher")
+            score -= 12
+    
     if not mistakes:
         feedback.append("🎯 Perfect plank form!")
     
@@ -342,7 +362,7 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
-    """Analyze lunge form."""
+    """Analyze lunge form with bilateral assessment."""
     score = 100
     mistakes = []
     feedback = []
@@ -350,12 +370,21 @@ def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
     left_hip = get_keypoint(keypoints, 'left_hip')
     left_knee = get_keypoint(keypoints, 'left_knee')
     left_ankle = get_keypoint(keypoints, 'left_ankle')
+    right_hip = get_keypoint(keypoints, 'right_hip')
     right_knee = get_keypoint(keypoints, 'right_knee')
+    right_ankle = get_keypoint(keypoints, 'right_ankle')
     left_shoulder = get_keypoint(keypoints, 'left_shoulder')
+    right_shoulder = get_keypoint(keypoints, 'right_shoulder')
     
-    if left_hip and left_knee and left_ankle:
-        # Front knee angle
-        knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+    # Determine which leg is forward (more bent)
+    if left_hip and left_knee and left_ankle and right_hip and right_knee and right_ankle:
+        left_angle = calculate_angle(left_hip, left_knee, left_ankle)
+        right_angle = calculate_angle(right_hip, right_knee, right_ankle)
+        
+        # Use the more bent knee (front leg)
+        knee_angle = min(left_angle, right_angle)
+        front_knee = left_knee if left_angle < right_angle else right_knee
+        front_ankle = left_ankle if left_angle < right_angle else right_ankle
         
         if knee_angle < 80:
             mistakes.append("🔴 Front knee too bent - don't let it go past 90°")
@@ -395,7 +424,7 @@ def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_pushup(keypoints: List[Keypoint]) -> PostureAnalysis:
-    """Analyze push-up form."""
+    """Analyze push-up form with bilateral assessment."""
     score = 100
     mistakes = []
     feedback = []
@@ -405,10 +434,17 @@ def analyze_pushup(keypoints: List[Keypoint]) -> PostureAnalysis:
     left_wrist = get_keypoint(keypoints, 'left_wrist')
     left_hip = get_keypoint(keypoints, 'left_hip')
     left_ankle = get_keypoint(keypoints, 'left_ankle')
+    right_shoulder = get_keypoint(keypoints, 'right_shoulder')
+    right_elbow = get_keypoint(keypoints, 'right_elbow')
+    right_wrist = get_keypoint(keypoints, 'right_wrist')
+    right_hip = get_keypoint(keypoints, 'right_hip')
+    right_ankle = get_keypoint(keypoints, 'right_ankle')
     
-    if left_shoulder and left_elbow and left_wrist:
-        # Check elbow angle
-        elbow_angle = calculate_angle(left_shoulder, left_elbow, left_wrist)
+    # Use bilateral averaging
+    if left_shoulder and left_elbow and left_wrist and right_shoulder and right_elbow and right_wrist:
+        left_angle = calculate_angle(left_shoulder, left_elbow, left_wrist)
+        right_angle = calculate_angle(right_shoulder, right_elbow, right_wrist)
+        elbow_angle = (left_angle + right_angle) / 2  # Bilateral average
         
         if elbow_angle > 170:
             feedback.append("Arms extended - ready position")

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,12 +13,12 @@ import * as Haptics from 'expo-haptics';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
-import Svg, { Circle, Line } from 'react-native-svg';
 import { poseDetectionService, Pose, PostureAnalysis } from '../services/PoseDetectionService';
 import { poseAPIService } from '../services/PoseAPIService';
 import { storageService } from '../services/StorageService';
 import { colors, spacing, fontSize } from '../theme';
 import { useNavigation, useRoute, CommonActions } from '@react-navigation/native';
+import Svg, { Line as SvgLine, Circle as SvgCircle } from 'react-native-svg';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CAMERA_HEIGHT = SCREEN_HEIGHT * 0.9; // Nearly full-screen (90%)
@@ -56,6 +56,10 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   // Rep counting hysteresis (prevent false counts)
   const lastRepAngleRef = useRef<number>(0);
   const repTransitionThresholdRef = useRef<number>(20); // Minimum angle change for rep
+  
+  // Velocity tracking for tempo analysis
+  const velocityHistoryRef = useRef<number[]>([]);
+  const lastAngleRef = useRef<number>(0);
 
   const cameraRef = useRef<CameraView>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -447,22 +451,41 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   };
   
   const processDetectedPose = (pose: Pose, imageWidth?: number, imageHeight?: number) => {
-    // Scale coordinates to screen dimensions
-    // MoveNet returns pixel coordinates based on input image size
+    // Scale coordinates to screen dimensions with improved validation
+    // MediaPipe/MoveNet return normalized (0-1) or pixel coordinates
     const imgWidth = imageWidth || SCREEN_WIDTH;
     const imgHeight = imageHeight || CAMERA_HEIGHT;
     
     const scaledPose: Pose = {
       ...pose,
       keypoints: pose.keypoints.map(kp => {
-        // If coordinates are normalized (0-1), scale them
-        // If they're already in pixels, convert them to screen space
-        const isNormalized = kp.x <= 1 && kp.y <= 1;
+        // MediaPipe Full model returns normalized coordinates (0-1)
+        const isNormalized = kp.x >= 0 && kp.x <= 1 && kp.y >= 0 && kp.y <= 1;
+        
+        // Scale to screen dimensions
+        let scaledX: number, scaledY: number;
+        
+        if (isNormalized) {
+          // Direct scaling from normalized coordinates
+          scaledX = kp.x * SCREEN_WIDTH;
+          scaledY = kp.y * CAMERA_HEIGHT;
+        } else {
+          // Convert from image pixel coordinates to screen coordinates
+          scaledX = (kp.x / imgWidth) * SCREEN_WIDTH;
+          scaledY = (kp.y / imgHeight) * CAMERA_HEIGHT;
+        }
+        
+        // Mirror X coordinate for front camera (camera shows mirrored view)
+        scaledX = SCREEN_WIDTH - scaledX;
+        
+        // Clamp to screen bounds to prevent off-screen rendering
+        scaledX = Math.max(0, Math.min(SCREEN_WIDTH, scaledX));
+        scaledY = Math.max(0, Math.min(CAMERA_HEIGHT, scaledY));
         
         return {
           ...kp,
-          x: isNormalized ? kp.x * SCREEN_WIDTH : (kp.x / imgWidth) * SCREEN_WIDTH,
-          y: isNormalized ? kp.y * CAMERA_HEIGHT : (kp.y / imgHeight) * CAMERA_HEIGHT,
+          x: scaledX,
+          y: scaledY,
         };
       }),
     };
@@ -528,66 +551,139 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 
     const exerciseLower = exercise.toLowerCase();
     
-    // Get keypoints
+    // Get keypoints (bilateral for better accuracy)
     const leftShoulder = pose.keypoints.find(kp => kp.name === 'left_shoulder');
     const leftElbow = pose.keypoints.find(kp => kp.name === 'left_elbow');
     const leftWrist = pose.keypoints.find(kp => kp.name === 'left_wrist');
     const leftHip = pose.keypoints.find(kp => kp.name === 'left_hip');
     const leftKnee = pose.keypoints.find(kp => kp.name === 'left_knee');
     const leftAnkle = pose.keypoints.find(kp => kp.name === 'left_ankle');
+    
+    const rightShoulder = pose.keypoints.find(kp => kp.name === 'right_shoulder');
+    const rightElbow = pose.keypoints.find(kp => kp.name === 'right_elbow');
+    const rightWrist = pose.keypoints.find(kp => kp.name === 'right_wrist');
+    const rightHip = pose.keypoints.find(kp => kp.name === 'right_hip');
+    const rightKnee = pose.keypoints.find(kp => kp.name === 'right_knee');
+    const rightAnkle = pose.keypoints.find(kp => kp.name === 'right_ankle');
 
     if (exerciseLower.includes('curl') || exerciseLower.includes('bicep')) {
-      // Bicep curl counting with hysteresis
-      if (leftShoulder && leftElbow && leftWrist) {
-        const angle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+      // Bicep curl counting with bilateral tracking and velocity analysis
+      if (leftShoulder && leftElbow && leftWrist && rightShoulder && rightElbow && rightWrist) {
+        const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+        const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
+        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
+        
+        // Velocity tracking
+        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
+        velocityHistoryRef.current.push(angleChange);
+        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
+        lastAngleRef.current = avgAngle;
         
         // Extended position (arm straight)
-        if (angle > 160 && repStage !== 'down') {
+        if (avgAngle > 160 && repStage !== 'down') {
           setRepStage('down');
-          lastRepAngleRef.current = angle;
+          lastRepAngleRef.current = avgAngle;
         }
         // Contracted position (arm bent) - requires significant angle change
-        if (angle < 40 && repStage === 'down' && (lastRepAngleRef.current - angle) > 120) {
-          setRepStage('up');
-          setRepCount(prev => prev + 1);
-          lastRepAngleRef.current = angle;
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        if (avgAngle < 40 && repStage === 'down' && (lastRepAngleRef.current - avgAngle) > 120) {
+          // Check tempo isn't too fast
+          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
+          if (avgVelocity < 20) { // Not rushing
+            setRepStage('up');
+            setRepCount(prev => prev + 1);
+            lastRepAngleRef.current = avgAngle;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          }
         }
       }
     } else if (exerciseLower.includes('squat')) {
-      // Squat counting with hysteresis
-      if (leftHip && leftKnee && leftAnkle) {
-        const angle = calculateAngle(leftHip, leftKnee, leftAnkle);
+      // Squat counting with bilateral tracking and velocity analysis
+      if (leftHip && leftKnee && leftAnkle && rightHip && rightKnee && rightAnkle) {
+        const leftAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+        const rightAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
+        
+        // Velocity tracking
+        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
+        velocityHistoryRef.current.push(angleChange);
+        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
+        lastAngleRef.current = avgAngle;
         
         // Standing position
-        if (angle > 160 && repStage !== 'up') {
+        if (avgAngle > 160 && repStage !== 'up') {
           setRepStage('up');
-          lastRepAngleRef.current = angle;
+          lastRepAngleRef.current = avgAngle;
         }
         // Squat position - requires going below 100° from standing
-        if (angle < 100 && repStage === 'up' && (lastRepAngleRef.current - angle) > 60) {
-          setRepStage('down');
-          setRepCount(prev => prev + 1);
-          lastRepAngleRef.current = angle;
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        if (avgAngle < 100 && repStage === 'up' && (lastRepAngleRef.current - avgAngle) > 60) {
+          // Check tempo isn't too fast
+          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
+          if (avgVelocity < 15) { // Not rushing
+            setRepStage('down');
+            setRepCount(prev => prev + 1);
+            lastRepAngleRef.current = avgAngle;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          }
         }
       }
     } else if (exerciseLower.includes('push')) {
-      // Push-up counting with hysteresis
-      if (leftShoulder && leftElbow && leftWrist) {
-        const angle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+      // Push-up counting with bilateral tracking and velocity analysis
+      if (leftShoulder && leftElbow && leftWrist && rightShoulder && rightElbow && rightWrist) {
+        const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+        const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
+        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
+        
+        // Velocity tracking
+        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
+        velocityHistoryRef.current.push(angleChange);
+        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
+        lastAngleRef.current = avgAngle;
         
         // Extended position (plank)
-        if (angle > 160 && repStage !== 'up') {
+        if (avgAngle > 160 && repStage !== 'up') {
           setRepStage('up');
-          lastRepAngleRef.current = angle;
+          lastRepAngleRef.current = avgAngle;
         }
         // Lowered position - requires going below 90° from plank
-        if (angle < 90 && repStage === 'up' && (lastRepAngleRef.current - angle) > 70) {
-          setRepStage('down');
-          setRepCount(prev => prev + 1);
-          lastRepAngleRef.current = angle;
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        if (avgAngle < 90 && repStage === 'up' && (lastRepAngleRef.current - avgAngle) > 70) {
+          // Check tempo isn't too fast
+          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
+          if (avgVelocity < 15) { // Not rushing
+            setRepStage('down');
+            setRepCount(prev => prev + 1);
+            lastRepAngleRef.current = avgAngle;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          }
+        }
+      }
+    } else if (exerciseLower.includes('lunge')) {
+      // Lunge counting with bilateral tracking
+      if (leftHip && leftKnee && leftAnkle && rightHip && rightKnee && rightAnkle) {
+        const leftAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+        const rightAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+        const frontAngle = Math.min(leftAngle, rightAngle); // Front leg (more bent)
+        
+        // Velocity tracking
+        const angleChange = Math.abs(frontAngle - lastAngleRef.current);
+        velocityHistoryRef.current.push(angleChange);
+        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
+        lastAngleRef.current = frontAngle;
+        
+        // Standing position
+        if (frontAngle > 150 && repStage !== 'up') {
+          setRepStage('up');
+          lastRepAngleRef.current = frontAngle;
+        }
+        // Lunge position - requires going below 90° from standing
+        if (frontAngle < 90 && repStage === 'up' && (lastRepAngleRef.current - frontAngle) > 60) {
+          // Check tempo isn't too fast
+          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
+          if (avgVelocity < 15) { // Not rushing
+            setRepStage('down');
+            setRepCount(prev => prev + 1);
+            lastRepAngleRef.current = frontAngle;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          }
         }
       }
     }
@@ -723,44 +819,52 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   const renderSkeleton = () => {
     if (!currentPose) return null;
 
-    // MediaPipe POSE_CONNECTIONS - Complete skeleton connections
+    // Simplified, reliable skeleton connections (core body only)
+    // Using only high-confidence keypoints to prevent disfigurement
     const connections = [
-      // Face
-      ['nose', 'left_eye'],
-      ['nose', 'right_eye'],
-      ['left_eye', 'left_ear'],
-      ['right_eye', 'right_ear'],
-      // Torso
+      // Core body structure (most reliable)
       ['left_shoulder', 'right_shoulder'],
       ['left_shoulder', 'left_hip'],
       ['right_shoulder', 'right_hip'],
       ['left_hip', 'right_hip'],
-      // Left arm
+      
+      // Arms (reliable for exercises)
       ['left_shoulder', 'left_elbow'],
       ['left_elbow', 'left_wrist'],
-      // Right arm
       ['right_shoulder', 'right_elbow'],
       ['right_elbow', 'right_wrist'],
-      // Left leg
+      
+      // Legs (reliable for exercises)
       ['left_hip', 'left_knee'],
       ['left_knee', 'left_ankle'],
-      // Right leg
       ['right_hip', 'right_knee'],
       ['right_knee', 'right_ankle'],
-      // Hand details (enhanced with Full model)
-      ['left_wrist', 'left_pinky'],
+      
+      // Face (only if both points exist and have high confidence)
+      ['nose', 'left_eye'],
+      ['nose', 'right_eye'],
+      ['left_eye', 'left_ear'],
+      ['right_eye', 'right_ear'],
+      
+      // Hand details (optional, only with Full model)
       ['left_wrist', 'left_index'],
-      ['right_wrist', 'right_pinky'],
       ['right_wrist', 'right_index'],
-      // Foot details
+      
+      // Foot details (optional, only with Full model)
       ['left_ankle', 'left_heel'],
       ['left_ankle', 'left_foot_index'],
       ['right_ankle', 'right_heel'],
       ['right_ankle', 'right_foot_index'],
     ];
 
-    const getKeypoint = (name: string) =>
-      currentPose.keypoints.find((kp) => kp.name === name);
+    const getKeypoint = (name: string) => {
+      const kp = currentPose.keypoints.find((k) => k.name === name);
+      // Only return keypoint if it exists and has good confidence
+      if (kp && kp.score && kp.score > 0.3) {
+        return kp;
+      }
+      return null;
+    };
 
     // MediaPipe colors: (245,117,66) orange and (245,66,230) magenta
     const lineColor = postureAnalysis?.color === 'green' 
@@ -776,16 +880,22 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       : 'rgb(245,66,130)';
 
     return (
-      <Svg style={styles.skeletonOverlay} width={SCREEN_WIDTH} height={CAMERA_HEIGHT}>
+      <Svg style={styles.skeletonOverlay}>
         {/* Draw connections first (behind joints) */}
         {connections.map(([start, end], index) => {
           const startKp = getKeypoint(start);
           const endKp = getKeypoint(end);
-          if (!startKp || !endKp || !startKp.score || !endKp.score) return null;
-          if (startKp.score < 0.3 || endKp.score < 0.3) return null;
+          
+          // Skip if either keypoint is missing or low confidence
+          if (!startKp || !endKp) return null;
+          
+          // Additional validation for coordinate sanity
+          if (startKp.x < 0 || startKp.y < 0 || endKp.x < 0 || endKp.y < 0) return null;
+          if (startKp.x > SCREEN_WIDTH || startKp.y > CAMERA_HEIGHT || 
+              endKp.x > SCREEN_WIDTH || endKp.y > CAMERA_HEIGHT) return null;
 
           return (
-            <Line
+            <SvgLine
               key={`line-${index}`}
               x1={startKp.x}
               y1={startKp.y}
@@ -793,16 +903,17 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
               y2={endKp.y}
               stroke={lineColor}
               strokeWidth={3}
-              strokeLinecap="round"
-              opacity={0.8}
             />
           );
         })}
         {/* Draw joints on top */}
         {currentPose.keypoints.map((kp, index) => {
+          // Only render high-confidence keypoints within screen bounds
           if (!kp.score || kp.score < 0.3) return null;
+          if (kp.x < 0 || kp.y < 0 || kp.x > SCREEN_WIDTH || kp.y > CAMERA_HEIGHT) return null;
+          
           return (
-            <Circle
+            <SvgCircle
               key={`joint-${index}`}
               cx={kp.x}
               cy={kp.y}
@@ -815,6 +926,16 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       </Svg>
     );
   };
+
+  const smoothedPose = useMemo(() => {
+    if (!currentPose) return null;
+    return currentPose; // Already smoothed by temporal averaging
+  }, [currentPose]);
+
+  const skeletonElements = useMemo(() => {
+    if (!smoothedPose) return null;
+    return renderSkeleton();
+  }, [smoothedPose, postureAnalysis?.color]);
 
   if (!permission) {
     return (
@@ -861,7 +982,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
             setCameraReady(true);
           }}
         />
-        {renderSkeleton()}
+        {skeletonElements}
         {renderAngles()}
 
         {/* Score Indicator */}
@@ -1028,8 +1149,9 @@ const styles = StyleSheet.create({
     flex: 1,
     position: 'relative',
     backgroundColor: colors.cardBg,
-    margin: spacing.lg,
-    borderRadius: 20,
+    marginHorizontal: spacing.sm,
+    marginVertical: spacing.xs,
+    borderRadius: 16,
     overflow: 'hidden',
   },
   camera: {
