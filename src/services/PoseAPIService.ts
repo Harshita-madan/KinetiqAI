@@ -16,7 +16,7 @@ const getBackendUrl = () => {
   // For mobile, use your computer's local IP
   // Replace with your actual IP address when testing on device
   // You can find it with `ipconfig` (Windows) or `ifconfig` (Mac/Linux)
-  return 'http://10.100.97.82:8000'; // Update this IP for your network
+  return 'http://192.168.0.105:8000'; // Update this IP for your network
 };
 
 const BACKEND_URL = getBackendUrl();

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,17 +8,20 @@ import {
   Platform,
   TouchableOpacity,
   TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, borderRadius, fontSize, fontWeight, shadows } from '../theme';
 import { Avatar } from '../components';
+import { getOnDemandChatbot, ChatMessage as OnDemandMessage } from '../services/OnDemandChatbotService';
 
 interface Message {
   id: string;
   text: string;
   isUser: boolean;
   timestamp: Date;
+  isLoading?: boolean;
 }
 
 interface ChatBubbleProps {
@@ -35,7 +38,7 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message }) => (
     {!message.isUser && (
       <View style={styles.aiAvatarContainer}>
         <View style={styles.aiAvatar}>
-          <Ionicons name="hardware-chip" size={16} color={colors.white} />
+          <Ionicons name="fitness" size={16} color={colors.white} />
         </View>
       </View>
     )}
@@ -45,22 +48,31 @@ const ChatBubble: React.FC<ChatBubbleProps> = ({ message }) => (
         message.isUser ? styles.userBubbleContent : styles.aiBubbleContent,
       ]}
     >
-      <Text
-        style={[
-          styles.messageText,
-          message.isUser ? styles.userMessageText : styles.aiMessageText,
-        ]}
-      >
-        {message.text}
-      </Text>
-      <Text
-        style={[
-          styles.timestamp,
-          message.isUser ? styles.userTimestamp : styles.aiTimestamp,
-        ]}
-      >
-        {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-      </Text>
+      {message.isLoading ? (
+        <ActivityIndicator size="small" color={colors.primary} />
+      ) : (
+        <>
+          <Text
+            style={[
+              styles.messageText,
+              message.isUser ? styles.userMessageText : styles.aiMessageText,
+            ]}
+          >
+            {message.text}
+          </Text>
+          <Text
+            style={[
+              styles.timestamp,
+              message.isUser ? styles.userTimestamp : styles.aiTimestamp,
+            ]}
+          >
+            {message.timestamp.toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </Text>
+        </>
+      )}
     </View>
   </View>
 );
@@ -78,21 +90,22 @@ export const ChatScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
-      text: "Hello! I'm KinetiqAI, your intelligent assistant. How can I help you today?",
+      text: "Hi! I'm KinetiqAI Coach. I'm here to help you with posture corrections, movement guidance, and fitness tips. What would you like to know?",
       isUser: false,
       timestamp: new Date(),
     },
   ]);
+  const [isLoading, setIsLoading] = useState(false);
 
   const suggestedPrompts = [
-    "What can you help me with?",
-    "Explain accessibility features",
-    "How does AI vision work?",
-    "Tell me about offline mode",
+    'How can I improve my posture?',
+    'What does my posture analysis show?',
+    'Give me exercise modifications',
+    'How do I prevent injury during workouts?',
   ];
 
-  const sendMessage = () => {
-    if (!inputText.trim()) return;
+  const sendMessage = async () => {
+    if (!inputText.trim() || isLoading) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -103,17 +116,34 @@ export const ChatScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
     setMessages((prev) => [...prev, userMessage]);
     setInputText('');
+    setIsLoading(true);
 
-    // Simulate AI response
-    setTimeout(() => {
+    try {
+      const chatbot = getOnDemandChatbot();
+      const response = await chatbot.sendMessage(userMessage.text);
+
       const aiResponse: Message = {
         id: (Date.now() + 1).toString(),
-        text: "Thanks for your message! I'm a demo AI assistant. In the full version, I would provide helpful responses based on your questions. Feel free to explore the app's features!",
+        text: response,
         isUser: false,
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, aiResponse]);
-    }, 1000);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get response from chatbot';
+      console.error('Chat Error:', errorMessage);
+
+      const errorResponse: Message = {
+        id: (Date.now() + 1).toString(),
+        text: "I'm experiencing a technical issue. Please try again in a moment.",
+        isUser: false,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorResponse]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleSuggestedPrompt = (text: string) => {
@@ -176,16 +206,20 @@ export const ChatScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           <TouchableOpacity
             style={[
               styles.sendButton,
-              inputText.trim() ? styles.sendButtonActive : styles.sendButtonInactive,
+              inputText.trim() && !isLoading ? styles.sendButtonActive : styles.sendButtonInactive,
             ]}
             onPress={sendMessage}
-            disabled={!inputText.trim()}
+            disabled={!inputText.trim() || isLoading}
           >
-            <Ionicons
-              name="send"
-              size={20}
-              color={inputText.trim() ? colors.white : colors.gray400}
-            />
+            {isLoading ? (
+              <ActivityIndicator size="small" color={colors.white} />
+            ) : (
+              <Ionicons
+                name="send"
+                size={20}
+                color={inputText.trim() ? colors.white : colors.gray400}
+              />
+            )}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
