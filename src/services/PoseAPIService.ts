@@ -12,12 +12,6 @@ const getBackendUrl = () => {
   if (Platform.OS === 'web') {
     return 'http://localhost:8000';
   }
-<<<<<<< HEAD
-  // For mobile, use your computer's local IP
-  // Replace with your actual IP address when testing on device
-  // You can find it with `ipconfig` (Windows) or `ifconfig` (Mac/Linux)
-  return 'http://192.168.0.105:8000'; // Update this IP for your network
-=======
   
   // For mobile: Auto-detect IP from Expo dev server
   try {
@@ -39,7 +33,6 @@ const getBackendUrl = () => {
   // Fallback to localhost (won't work on physical devices)
   console.warn('⚠️ Using localhost fallback - update IP manually if on physical device');
   return 'http://localhost:8000';
->>>>>>> 0ee4cc36df103b6a49a29c1e2b2c2e509b8c8c23
 };
 
 const BACKEND_URL = getBackendUrl();
