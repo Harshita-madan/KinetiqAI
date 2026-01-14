@@ -51,15 +51,19 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   
   // Temporal smoothing for skeleton
   const poseHistoryRef = useRef<Pose[]>([]);
-  const SMOOTHING_WINDOW = 3; // Average last 3 poses for smoother skeleton
+  const SMOOTHING_WINDOW = 5; // Increased from 3 for smoother motion
   
   // Rep counting hysteresis (prevent false counts)
   const lastRepAngleRef = useRef<number>(0);
   const repTransitionThresholdRef = useRef<number>(20); // Minimum angle change for rep
+  const repStateRef = useRef<'neutral' | 'contracting' | 'extending'>('neutral'); // State machine
   
   // Velocity tracking for tempo analysis
   const velocityHistoryRef = useRef<number[]>([]);
   const lastAngleRef = useRef<number>(0);
+  
+  // Exponential Moving Average (EMA) smoothing - more responsive than simple averaging
+  const emaAlpha = 0.3; // Smoothing factor (0.3 = 70% history, 30% new data)
 
   const cameraRef = useRef<CameraView>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -220,10 +224,12 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     setIsRecording(true);
     
     // Detection interval based on mode
-    // API mode can be faster since processing is on server
-    const detectionInterval = detectionMode === 'api' ? 300 : 
-                              detectionMode === 'local' ? 200 : 
-                              300; // simulation
+    // API mode: Balanced for network latency (400ms = ~2.5 FPS)
+    // Local mode: Faster for smooth skeleton (250ms = 4 FPS)
+    // Simulation: Match API timing (400ms)
+    const detectionInterval = detectionMode === 'api' ? 400 : 
+                              detectionMode === 'local' ? 250 : 
+                              400; // simulation
     
     const runDetection = async () => {
       if (!isActive) return;
@@ -456,7 +462,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     const imgWidth = imageWidth || SCREEN_WIDTH;
     const imgHeight = imageHeight || CAMERA_HEIGHT;
     
-    const scaledPose: Pose = {
+    let finalPose: Pose = {
       ...pose,
       keypoints: pose.keypoints.map(kp => {
         // MediaPipe Full model returns normalized coordinates (0-1)
@@ -490,44 +496,50 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       }),
     };
 
-    // Temporal smoothing: Average poses over last N frames for smoother skeleton
-    poseHistoryRef.current.push(scaledPose);
-    if (poseHistoryRef.current.length > SMOOTHING_WINDOW) {
-      poseHistoryRef.current.shift();
-    }
-    
-    // Calculate smoothed pose by averaging keypoint positions
-    const smoothedPose: Pose = {
-      ...scaledPose,
-      keypoints: scaledPose.keypoints.map((kp, idx) => {
-        const historicalKeypoints = poseHistoryRef.current
-          .map(p => p.keypoints[idx])
-          .filter(k => k && k.score && k.score > 0.3);
-        
-        if (historicalKeypoints.length === 0) return kp;
-        
-        const avgX = historicalKeypoints.reduce((sum, k) => sum + k.x, 0) / historicalKeypoints.length;
-        const avgY = historicalKeypoints.reduce((sum, k) => sum + k.y, 0) / historicalKeypoints.length;
+    // Temporal smoothing: Exponential Moving Average (EMA) for responsive yet smooth skeleton
+    if (poseHistoryRef.current.length === 0) {
+      // First pose - no smoothing
+      poseHistoryRef.current.push(finalPose);
+    } else {
+      // EMA smoothing: new = alpha * current + (1 - alpha) * previous
+      const prevPose = poseHistoryRef.current[poseHistoryRef.current.length - 1];
+      const smoothedKeypoints = finalPose.keypoints.map((kp, idx) => {
+        const prevKp = prevPose.keypoints[idx];
+        if (!prevKp || !kp.score || kp.score < 0.3) return kp; // Skip low confidence
         
         return {
           ...kp,
-          x: avgX,
-          y: avgY
+          x: emaAlpha * kp.x + (1 - emaAlpha) * prevKp.x,
+          y: emaAlpha * kp.y + (1 - emaAlpha) * prevKp.y,
+          score: kp.score, // Keep original confidence
         };
-      })
-    };
+      });
+      
+      // Create new smoothed pose (don't reassign const)
+      finalPose = {
+        ...finalPose,
+        keypoints: smoothedKeypoints,
+      };
+      
+      poseHistoryRef.current.push(finalPose);
+      
+      // Keep only last few poses for potential fallback
+      if (poseHistoryRef.current.length > 10) {
+        poseHistoryRef.current.shift();
+      }
+    }
 
-    setCurrentPose(smoothedPose);
+    setCurrentPose(finalPose);
 
     // Count reps based on exercise type
-    countReps(scaledPose);
+    countReps(finalPose);
 
     // Analyze posture with basic form analysis
-    const analysis = poseDetectionService.analyzePosture(scaledPose, exercise);
+    const analysis = poseDetectionService.analyzePosture(finalPose, exercise);
     
     // Apply Personal Image Classifier (PIC) Analysis
     const personalInsights = poseDetectionService.analyzePersonalPosePattern(
-      scaledPose, 
+      finalPose, 
       exercise, 
       scores
     );
@@ -819,80 +831,112 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   const renderSkeleton = () => {
     if (!currentPose) return null;
 
-    // Simplified, reliable skeleton connections (core body only)
-    // Using only high-confidence keypoints to prevent disfigurement
-    const connections = [
-      // Core body structure (most reliable)
-      ['left_shoulder', 'right_shoulder'],
-      ['left_shoulder', 'left_hip'],
-      ['right_shoulder', 'right_hip'],
-      ['left_hip', 'right_hip'],
+    // MediaPipe/MoveNet connections with thickness based on importance
+    const connections: Array<[string, string, number]> = [
+      // Core body (thickest - most important)
+      ['left_shoulder', 'right_shoulder', 5],
+      ['left_shoulder', 'left_hip', 5],
+      ['right_shoulder', 'right_hip', 5],
+      ['left_hip', 'right_hip', 5],
       
-      // Arms (reliable for exercises)
-      ['left_shoulder', 'left_elbow'],
-      ['left_elbow', 'left_wrist'],
-      ['right_shoulder', 'right_elbow'],
-      ['right_elbow', 'right_wrist'],
+      // Arms (medium thickness)
+      ['left_shoulder', 'left_elbow', 4],
+      ['left_elbow', 'left_wrist', 4],
+      ['right_shoulder', 'right_elbow', 4],
+      ['right_elbow', 'right_wrist', 4],
       
-      // Legs (reliable for exercises)
-      ['left_hip', 'left_knee'],
-      ['left_knee', 'left_ankle'],
-      ['right_hip', 'right_knee'],
-      ['right_knee', 'right_ankle'],
+      // Legs (medium thickness)
+      ['left_hip', 'left_knee', 4],
+      ['left_knee', 'left_ankle', 4],
+      ['right_hip', 'right_knee', 4],
+      ['right_knee', 'right_ankle', 4],
       
-      // Face (only if both points exist and have high confidence)
-      ['nose', 'left_eye'],
-      ['nose', 'right_eye'],
-      ['left_eye', 'left_ear'],
-      ['right_eye', 'right_ear'],
+      // Face (thin)
+      ['nose', 'left_eye', 2],
+      ['nose', 'right_eye', 2],
+      ['left_eye', 'left_ear', 2],
+      ['right_eye', 'right_ear', 2],
       
-      // Hand details (optional, only with Full model)
-      ['left_wrist', 'left_index'],
-      ['right_wrist', 'right_index'],
+      // Hands (thin)
+      ['left_wrist', 'left_index', 3],
+      ['right_wrist', 'right_index', 3],
       
-      // Foot details (optional, only with Full model)
-      ['left_ankle', 'left_heel'],
-      ['left_ankle', 'left_foot_index'],
-      ['right_ankle', 'right_heel'],
-      ['right_ankle', 'right_foot_index'],
+      // Feet (thin)
+      ['left_ankle', 'left_heel', 3],
+      ['left_ankle', 'left_foot_index', 3],
+      ['right_ankle', 'right_heel', 3],
+      ['right_ankle', 'right_foot_index', 3],
     ];
 
     const getKeypoint = (name: string) => {
       const kp = currentPose.keypoints.find((k) => k.name === name);
-      // Only return keypoint if it exists and has good confidence
-      if (kp && kp.score && kp.score > 0.3) {
+      // Enhanced confidence threshold - only show if score > 0.45
+      if (kp && kp.score && kp.score > 0.45) {
         return kp;
       }
       return null;
     };
 
-    // MediaPipe colors: (245,117,66) orange and (245,66,230) magenta
-    const lineColor = postureAnalysis?.color === 'green' 
-      ? 'rgb(245,117,66)' // MediaPipe orange for good form
-      : postureAnalysis?.color === 'yellow' 
-      ? 'rgb(245,200,66)' // Yellow for caution
-      : 'rgb(245,66,100)'; // Red-pink for errors
-    
-    const jointColor = postureAnalysis?.color === 'green' 
-      ? 'rgb(245,66,230)' // MediaPipe magenta for joints
-      : postureAnalysis?.color === 'yellow' 
-      ? 'rgb(245,180,66)' 
-      : 'rgb(245,66,130)';
+    // Dynamic colors based on form quality AND confidence
+    const getConnectionColor = (score1: number, score2: number) => {
+      const avgConfidence = (score1 + score2) / 2;
+      const formQuality = postureAnalysis?.color;
+      
+      // Low confidence = desaturated color
+      if (avgConfidence < 0.6) {
+        return `rgba(200, 200, 200, ${avgConfidence})`;
+      }
+      
+      // High confidence = vivid colors based on form
+      if (formQuality === 'green') {
+        return `rgba(86, 232, 160, ${Math.min(avgConfidence * 1.2, 1)})`; // Bright green
+      } else if (formQuality === 'yellow') {
+        return `rgba(232, 201, 86, ${Math.min(avgConfidence * 1.2, 1)})`; // Bright yellow
+      } else {
+        return `rgba(232, 86, 157, ${Math.min(avgConfidence * 1.2, 1)})`; // Bright pink
+      }
+    };
+
+    const getJointColor = (score: number) => {
+      const formQuality = postureAnalysis?.color;
+      
+      // Confidence-based opacity
+      const opacity = Math.min(score * 1.3, 1);
+      
+      if (score < 0.5) {
+        return `rgba(150, 150, 150, ${opacity})`;
+      }
+      
+      if (formQuality === 'green') {
+        return `rgba(245, 66, 230, ${opacity})`; // MediaPipe magenta
+      } else if (formQuality === 'yellow') {
+        return `rgba(245, 180, 66, ${opacity})`;
+      } else {
+        return `rgba(245, 66, 130, ${opacity})`;
+      }
+    };
 
     return (
       <Svg style={styles.skeletonOverlay}>
         {/* Draw connections first (behind joints) */}
-        {connections.map(([start, end], index) => {
+        {connections.map(([start, end, baseThickness], index) => {
           const startKp = getKeypoint(start);
           const endKp = getKeypoint(end);
           
           // Skip if either keypoint is missing or low confidence
-          if (!startKp || !endKp) return null;
+          if (!startKp || !endKp || !startKp.score || !endKp.score) return null;
+          
+          const avgConfidence = (startKp.score + endKp.score) / 2;
+          // Only draw connections with decent confidence
+          if (avgConfidence < 0.45) return null;
           
           // Additional validation for coordinate sanity
           if (startKp.x < 0 || startKp.y < 0 || endKp.x < 0 || endKp.y < 0) return null;
           if (startKp.x > SCREEN_WIDTH || startKp.y > CAMERA_HEIGHT || 
               endKp.x > SCREEN_WIDTH || endKp.y > CAMERA_HEIGHT) return null;
+
+          // Thickness varies with confidence
+          const thickness = baseThickness * Math.min(avgConfidence * 1.5, 1.2);
 
           return (
             <SvgLine
@@ -901,25 +945,30 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
               y1={startKp.y}
               x2={endKp.x}
               y2={endKp.y}
-              stroke={lineColor}
-              strokeWidth={3}
+              stroke={getConnectionColor(startKp.score, endKp.score)}
+              strokeWidth={thickness}
+              strokeLinecap="round"
             />
           );
         })}
         {/* Draw joints on top */}
         {currentPose.keypoints.map((kp, index) => {
           // Only render high-confidence keypoints within screen bounds
-          if (!kp.score || kp.score < 0.3) return null;
+          if (!kp.score || kp.score < 0.45) return null;
           if (kp.x < 0 || kp.y < 0 || kp.x > SCREEN_WIDTH || kp.y > CAMERA_HEIGHT) return null;
+          
+          // Joint size based on confidence
+          const radius = 7 * Math.min(kp.score * 1.3, 1.1);
           
           return (
             <SvgCircle
               key={`joint-${index}`}
               cx={kp.x}
               cy={kp.y}
-              r={4}
-              fill={jointColor}
-              opacity={0.9}
+              r={radius}
+              fill={getJointColor(kp.score)}
+              stroke="rgba(255, 255, 255, 0.8)"
+              strokeWidth={2}
             />
           );
         })}
@@ -1146,23 +1195,26 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
   },
   cameraContainer: {
-    flex: 1,
+    height: CAMERA_HEIGHT,
+    width: SCREEN_WIDTH - (spacing.sm * 2),
     position: 'relative',
     backgroundColor: colors.cardBg,
     marginHorizontal: spacing.sm,
     marginVertical: spacing.xs,
     borderRadius: 16,
     overflow: 'hidden',
+    alignSelf: 'center',
   },
   camera: {
-    flex: 1,
+    width: '100%',
+    height: '100%',
   },
   skeletonOverlay: {
     position: 'absolute',
     top: 0,
     left: 0,
-    right: 0,
-    bottom: 0,
+    width: SCREEN_WIDTH,
+    height: CAMERA_HEIGHT,
   },
   scoreIndicator: {
     position: 'absolute',
