@@ -1,0 +1,3 @@
+# This is a backup of the original LiveWorkoutScreen before PoseTracker integration
+# The original file has been replaced with PoseTracker WebView integration
+# See LiveWorkoutScreen.tsx for the new implementation using PoseTracker
