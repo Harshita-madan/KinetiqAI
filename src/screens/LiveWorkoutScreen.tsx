@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,17 +11,17 @@ import {
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
-import { poseDetectionService, Pose, PostureAnalysis } from '../services/PoseDetectionService';
-import { poseAPIService } from '../services/PoseAPIService';
 import { storageService } from '../services/StorageService';
+import { poseTrackerService } from '../services/PoseTrackerService';
 import { colors, spacing, fontSize } from '../theme';
-import { useNavigation, useRoute, CommonActions } from '@react-navigation/native';
-import Svg, { Line as SvgLine, Circle as SvgCircle } from 'react-native-svg';
+import { useNavigation, useRoute } from '@react-navigation/native';
+import { PoseTrackerWebView } from '../components/PoseTrackerWebView';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const CAMERA_HEIGHT = SCREEN_HEIGHT * 0.9; // Nearly full-screen (90%)
+
+// PoseTracker API Key
+const POSETRACKER_API_KEY = '218b867b-ee16-42b7-ac31-4fe0cb5fde84';
 
 interface RouteParams {
   exercise: string;
@@ -34,167 +34,40 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 }) => {
   const { exercise, duration } = route.params as RouteParams;
 
-  const [permission, requestPermission] = useCameraPermissions();
-  const [isLoading, setIsLoading] = useState(false);
   const [isActive, setIsActive] = useState(false);
   const [timeElapsed, setTimeElapsed] = useState(0);
-  const [currentPose, setCurrentPose] = useState<Pose | null>(null);
-  const [postureAnalysis, setPostureAnalysis] = useState<PostureAnalysis | null>(null);
-  const [scores, setScores] = useState<number[]>([]);
-  const [skeletonImages, setSkeletonImages] = useState<string[]>([]);
-  const [isDetectorReady, setIsDetectorReady] = useState(false);
-  const [isInitializing, setIsInitializing] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
   const [repCount, setRepCount] = useState(0);
-  const [repStage, setRepStage] = useState<'up' | 'down' | null>(null);
-  
-  // Temporal smoothing for skeleton
-  const poseHistoryRef = useRef<Pose[]>([]);
-  const SMOOTHING_WINDOW = 5; // Increased from 3 for smoother motion
-  
-  // Rep counting hysteresis (prevent false counts)
-  const lastRepAngleRef = useRef<number>(0);
-  const repTransitionThresholdRef = useRef<number>(20); // Minimum angle change for rep
-  const repStateRef = useRef<'neutral' | 'contracting' | 'extending'>('neutral'); // State machine
-  
-  // Velocity tracking for tempo analysis
-  const velocityHistoryRef = useRef<number[]>([]);
-  const lastAngleRef = useRef<number>(0);
-  
-  // Exponential Moving Average (EMA) smoothing - more responsive than simple averaging
-  const emaAlpha = 0.3; // Smoothing factor (0.3 = 70% history, 30% new data)
+  const [detectionStatus, setDetectionStatus] = useState('Initializing PoseTracker...');
+  const intervalRef = React.useRef<NodeJS.Timeout | null>(null);
 
-  const cameraRef = useRef<CameraView>(null);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const poseIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const isCapturingRef = useRef<boolean>(false);
-  const captureFailCountRef = useRef<number>(0);
-  const frameCountRef = useRef<number>(0);
-  const maxCaptureFailures = 5;
-  const [useBackendAPI, setUseBackendAPI] = useState(false);
-  const [detectionMode, setDetectionMode] = useState<'checking' | 'api' | 'local' | 'simulation'>('checking');
-
+  // Initialize PoseTracker service
   useEffect(() => {
-    // Only request camera permission on mount
-    if (!permission) {
-      requestPermission();
+    try {
+      poseTrackerService.initialize({
+        apiKey: POSETRACKER_API_KEY,
+        difficulty: 'medium',
+        enableSkeleton: true,
+      });
+      console.log('[LiveWorkout] PoseTracker service initialized');
+    } catch (error) {
+      console.error('[LiveWorkout] PoseTracker initialization error:', error);
+      Alert.alert('Error', 'Failed to initialize PoseTracker');
     }
+
     return () => {
       cleanup();
     };
   }, []);
 
+  // Timer effect
   useEffect(() => {
     if (isActive) {
       startTimer();
-      startPoseDetection();
     } else {
       stopTimer();
-      stopPoseDetection();
     }
+    return () => stopTimer();
   }, [isActive]);
-
-  const initializeDetector = async (): Promise<boolean> => {
-    if (isDetectorReady) return true;
-    
-    setIsInitializing(true);
-    setDetectionMode('checking');
-    
-    try {
-      console.log('Checking for backend pose server...');
-      
-      // First, try to connect to the backend API (preferred for real-time)
-      const serverAvailable = await poseAPIService.checkServerHealth();
-      
-      if (serverAvailable) {
-        console.log('✅ Backend pose server available - using API mode');
-        console.log('⚡ Skipping TensorFlow.js initialization (not needed with backend)');
-        setUseBackendAPI(true);
-        setDetectionMode('api');
-        setIsDetectorReady(true);
-        setIsInitializing(false);
-        return true;
-      }
-      
-      console.log('Backend not available, falling back to local detection...');
-      
-      // Fallback: Try local TensorFlow.js (web) or simulation (mobile)
-      if (Platform.OS === 'web') {
-        // Web can use local TensorFlow.js
-        const initTimeout = new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('Initialization timeout')), 15000)
-        );
-        
-        await Promise.race([
-          poseDetectionService.initialize(),
-          initTimeout
-        ]);
-        
-        const ready = poseDetectionService.isReady();
-        setDetectionMode(ready ? 'local' : 'simulation');
-        setIsDetectorReady(true);
-        setIsInitializing(false);
-        return true;
-      } else {
-        // Mobile: Use simulation mode if no backend
-        console.log('Mobile without backend - using simulation mode');
-        setDetectionMode('simulation');
-        setIsDetectorReady(true);
-        setIsInitializing(false);
-        
-        Alert.alert(
-          'Demo Mode',
-          'Pose server not detected. Running in demo mode.\n\nFor real-time detection, start the backend server:\ncd backend && python pose_server.py',
-          [{ text: 'OK' }]
-        );
-        
-        return true;
-      }
-      
-    } catch (error) {
-      console.error('Initialization failed:', error);
-      setIsInitializing(false);
-      
-      // Even if everything fails, allow simulation mode
-      setDetectionMode('simulation');
-      setIsDetectorReady(true);
-      
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      
-      Alert.alert(
-        'Using Demo Mode', 
-        `Could not connect to pose detection: ${errorMessage}\n\nRunning in demo mode with simulated poses.`,
-        [{ text: 'OK' }]
-      );
-      
-      return true;
-    }
-  };
-
-  // Safe navigation back handler
-  const handleSafeGoBack = () => {
-    if (navigation.canGoBack()) {
-      navigation.goBack();
-    } else {
-      // Navigate to home if we can't go back
-      navigation.reset({
-        index: 0,
-        routes: [{ name: 'MainTabs' }],
-      });
-    }
-  };
-
-  const initializeCamera = async () => {
-    try {
-      if (!permission?.granted) {
-        await requestPermission();
-      }
-    } catch (error) {
-      console.error('Camera permission error:', error);
-      Alert.alert('Error', 'Camera permission required for pose detection');
-    }
-  };
 
   const startTimer = () => {
     intervalRef.current = setInterval(() => {
@@ -209,536 +82,70 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     }
   };
 
-  const startPoseDetection = () => {
-    // Only start if detector is ready
-    if (!isDetectorReady) {
-      console.error('Cannot start pose detection - detector not ready');
-      Alert.alert('Error', 'Pose detector not ready. Please wait...');
-      setIsActive(false);
-      return;
-    }
-    
-    console.log(`Starting pose detection in ${detectionMode} mode...`);
-    captureFailCountRef.current = 0;
-    frameCountRef.current = 0;
-    setIsRecording(true);
-    
-    // Detection interval based on mode
-    // API mode: Balanced for network latency (400ms = ~2.5 FPS)
-    // Local mode: Faster for smooth skeleton (250ms = 4 FPS)
-    // Simulation: Match API timing (400ms)
-    const detectionInterval = detectionMode === 'api' ? 400 : 
-                              detectionMode === 'local' ? 250 : 
-                              400; // simulation
-    
-    const runDetection = async () => {
-      if (!isActive) return;
-      
-      if (detectionMode === 'api') {
-        // Use backend API for real pose detection
-        await detectPoseFromAPI();
-      } else if (detectionMode === 'local' && Platform.OS === 'web') {
-        // Web: Use local TensorFlow.js
-        await detectPoseFromVideo();
-      } else {
-        // Mobile: Use smart simulation that provides realistic feedback
-        // This gives a smooth experience while camera shows live preview
-        await detectPoseSimulated();
-      }
-      
-      frameCountRef.current++;
-    };
-    
-    // Run first detection immediately
-    runDetection();
-    
-    // Then continue at intervals
-    poseIntervalRef.current = setInterval(runDetection, detectionInterval);
-  };
-
-  const stopPoseDetection = () => {
-    if (poseIntervalRef.current) {
-      clearInterval(poseIntervalRef.current);
-      poseIntervalRef.current = null;
-    }
-    setIsRecording(false);
-    console.log(`Stopped detection after ${frameCountRef.current} frames`);
-  };
-
-  // Backend API detection - works on both web and mobile
-  const detectPoseFromAPI = async () => {
-    if (!isActive) return;
-    
-    // Prevent concurrent captures
-    if (isCapturingRef.current) {
-      return;
-    }
-
-    try {
-      isCapturingRef.current = true;
-      
-      // Capture frame from camera
-      if (cameraRef.current && cameraReady) {
-        const captureOptions = {
-          quality: 0.3, // Medium quality for API (better accuracy)
-          base64: true,
-          skipProcessing: true,
-          exif: false,
-        };
-        
-        // Capture with longer timeout for Full model processing
-        const capturePromise = cameraRef.current.takePictureAsync(captureOptions);
-        const timeoutPromise = new Promise<null>((resolve) => 
-          setTimeout(() => resolve(null), 5000) // Increased to 5s for Full model
-        );
-        
-        const photo = await Promise.race([capturePromise, timeoutPromise]);
-        
-        if (photo && photo.base64) {
-          // Send to backend API
-          const response = await poseAPIService.detectPose(photo.base64, exercise);
-          
-          if (response && response.success && response.poses.length > 0) {
-            const pose = response.poses[0];
-            const imageWidth = photo.width || SCREEN_WIDTH;
-            const imageHeight = photo.height || CAMERA_HEIGHT;
-            
-            // Process the detected pose
-            processDetectedPose(pose, imageWidth, imageHeight);
-            
-            // Use the analysis from the server
-            if (response.analysis) {
-              setPostureAnalysis(response.analysis);
-              if (isActive) {
-                setScores((prev) => [...prev, response.analysis.score]);
-              }
-            }
-            
-            captureFailCountRef.current = 0;
-            isCapturingRef.current = false;
-            return;
-          }
-        }
-        
-        captureFailCountRef.current++;
-      }
-      
-      isCapturingRef.current = false;
-      
-      // Fallback to simulation if API fails too many times
-      if (captureFailCountRef.current > maxCaptureFailures) {
-        console.log('API detection failing, using simulation');
-        await detectPoseSimulated();
-      }
-      
-    } catch (error) {
-      console.error('API detection error:', error);
-      isCapturingRef.current = false;
-      await detectPoseSimulated();
+  // Handle rep count changes from PoseTracker
+  const handleRepsChange = (reps: number) => {
+    setRepCount(reps);
+    if (reps > 0) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
   };
 
-  // Mobile: Smart simulation for smooth real-time feedback
-  // Provides realistic pose tracking experience while camera shows live preview
-  const detectPoseSimulated = async () => {
-    if (!isActive) return;
-    
-    try {
-      // Generate exercise-specific pose with realistic variations over time
-      const timeBasedVariation = Math.sin(frameCountRef.current * 0.1) * 0.02;
-      const pose = poseDetectionService.generateSimulatedPose(exercise);
-      
-      // Add time-based animation to make skeleton feel responsive
-      const animatedPose: Pose = {
-        ...pose,
-        keypoints: pose.keypoints.map((kp, idx) => ({
-          ...kp,
-          x: kp.x + timeBasedVariation * (idx % 2 === 0 ? 1 : -1),
-          y: kp.y + timeBasedVariation * 0.5,
-        })),
-      };
-      
-      processDetectedPose(animatedPose, SCREEN_WIDTH, CAMERA_HEIGHT);
-    } catch (error) {
-      console.error('Simulated detection error:', error);
+  // Handle status updates from PoseTracker
+  const handleStatusChange = (status: string) => {
+    setDetectionStatus(status);
+  };
+
+  // Handle data received from PoseTracker
+  const handlePoseTrackerData = (data: any) => {
+    if (data.type === 'counter' && data.current_count !== undefined) {
+      handleRepsChange(data.current_count);
     }
   };
 
-  // Video-style continuous frame detection (primarily for web)
-  const detectPoseFromVideo = async () => {
-    if (!isActive) return;
-    
-    // Prevent concurrent captures
-    if (isCapturingRef.current) {
-      return; // Skip this frame silently
-    }
-
-    try {
-      // Ensure detector is initialized
-      if (!poseDetectionService.isReady()) {
-        console.warn('Detector not ready during active session');
-        return;
-      }
-
-      let poses: Pose[] = [];
-      let imageWidth = SCREEN_WIDTH;
-      let imageHeight = CAMERA_HEIGHT;
-      
-      isCapturingRef.current = true;
-      
-      // Continuous frame capture from camera stream
-      if (cameraRef.current && cameraReady) {
-        try {
-          // Take a quick snapshot from the video stream
-          const captureOptions = {
-            quality: 0.1, // Low quality for speed
-            base64: true,
-            skipProcessing: true,
-            exif: false,
-            shutterSound: false, // No shutter sound for continuous capture
-          };
-          
-          // Quick capture with short timeout
-          const capturePromise = cameraRef.current.takePictureAsync(captureOptions);
-          const timeoutPromise = new Promise<null>((resolve) => 
-            setTimeout(() => resolve(null), 1500)
-          );
-          
-          const photo = await Promise.race([capturePromise, timeoutPromise]);
-          
-          if (photo && photo.base64) {
-            imageWidth = photo.width || SCREEN_WIDTH;
-            imageHeight = photo.height || CAMERA_HEIGHT;
-            
-            // Process the frame through pose detection
-            poses = await poseDetectionService.detectPose(photo.base64);
-            
-            if (poses.length > 0) {
-              captureFailCountRef.current = 0;
-            }
-          } else {
-            captureFailCountRef.current++;
-          }
-        } catch (captureError) {
-          // Silent fail for continuous capture
-          captureFailCountRef.current++;
-        }
-      }
-      
-      isCapturingRef.current = false;
-      
-      // Use simulated pose if camera isn't working (fallback for demo)
-      if (!poses || poses.length === 0) {
-        // After too many failures, use simulated pose silently
-        if (captureFailCountRef.current > maxCaptureFailures) {
-          const simulatedPose = poseDetectionService.generateSimulatedPose(exercise);
-          poses = [simulatedPose];
-        } else {
-          // Generate simulated pose as fallback
-          const simulatedPose = poseDetectionService.generateSimulatedPose(exercise);
-          poses = [simulatedPose];
-        }
-      }
-      
-      if (poses.length > 0) {
-        processDetectedPose(poses[0], imageWidth, imageHeight);
-      }
-    } catch (error) {
-      isCapturingRef.current = false;
-      // Silent fallback to simulated pose
-      const simulatedPose = poseDetectionService.generateSimulatedPose(exercise);
-      processDetectedPose(simulatedPose);
-    }
-  };
-
-  // Legacy function kept for compatibility
-  const detectPose = async () => {
-    await detectPoseFromVideo();
-  };
-  
-  const processDetectedPose = (pose: Pose, imageWidth?: number, imageHeight?: number) => {
-    // Scale coordinates to screen dimensions with improved validation
-    // MediaPipe/MoveNet return normalized (0-1) or pixel coordinates
-    const imgWidth = imageWidth || SCREEN_WIDTH;
-    const imgHeight = imageHeight || CAMERA_HEIGHT;
-    
-    let finalPose: Pose = {
-      ...pose,
-      keypoints: pose.keypoints.map(kp => {
-        // MediaPipe Full model returns normalized coordinates (0-1)
-        const isNormalized = kp.x >= 0 && kp.x <= 1 && kp.y >= 0 && kp.y <= 1;
-        
-        // Scale to screen dimensions
-        let scaledX: number, scaledY: number;
-        
-        if (isNormalized) {
-          // Direct scaling from normalized coordinates
-          scaledX = kp.x * SCREEN_WIDTH;
-          scaledY = kp.y * CAMERA_HEIGHT;
-        } else {
-          // Convert from image pixel coordinates to screen coordinates
-          scaledX = (kp.x / imgWidth) * SCREEN_WIDTH;
-          scaledY = (kp.y / imgHeight) * CAMERA_HEIGHT;
-        }
-        
-        // Mirror X coordinate for front camera (camera shows mirrored view)
-        scaledX = SCREEN_WIDTH - scaledX;
-        
-        // Clamp to screen bounds to prevent off-screen rendering
-        scaledX = Math.max(0, Math.min(SCREEN_WIDTH, scaledX));
-        scaledY = Math.max(0, Math.min(CAMERA_HEIGHT, scaledY));
-        
-        return {
-          ...kp,
-          x: scaledX,
-          y: scaledY,
-        };
-      }),
-    };
-
-    // Temporal smoothing: Exponential Moving Average (EMA) for responsive yet smooth skeleton
-    if (poseHistoryRef.current.length === 0) {
-      // First pose - no smoothing
-      poseHistoryRef.current.push(finalPose);
+  // Safe navigation back handler
+  const handleSafeGoBack = () => {
+    if (isActive) {
+      Alert.alert(
+        'End Workout?',
+        'Are you sure you want to end the workout?',
+        [
+          { text: 'Cancel', onPress: () => {} },
+          { text: 'End', onPress: () => finishWorkout() },
+        ]
+      );
+    } else if (navigation.canGoBack()) {
+      navigation.goBack();
     } else {
-      // EMA smoothing: new = alpha * current + (1 - alpha) * previous
-      const prevPose = poseHistoryRef.current[poseHistoryRef.current.length - 1];
-      const smoothedKeypoints = finalPose.keypoints.map((kp, idx) => {
-        const prevKp = prevPose.keypoints[idx];
-        if (!prevKp || !kp.score || kp.score < 0.3) return kp; // Skip low confidence
-        
-        return {
-          ...kp,
-          x: emaAlpha * kp.x + (1 - emaAlpha) * prevKp.x,
-          y: emaAlpha * kp.y + (1 - emaAlpha) * prevKp.y,
-          score: kp.score, // Keep original confidence
-        };
+      navigation.reset({
+        index: 0,
+        routes: [{ name: 'MainTabs' }],
       });
-      
-      // Create new smoothed pose (don't reassign const)
-      finalPose = {
-        ...finalPose,
-        keypoints: smoothedKeypoints,
-      };
-      
-      poseHistoryRef.current.push(finalPose);
-      
-      // Keep only last few poses for potential fallback
-      if (poseHistoryRef.current.length > 10) {
-        poseHistoryRef.current.shift();
-      }
-    }
-
-    setCurrentPose(finalPose);
-
-    // Count reps based on exercise type
-    countReps(finalPose);
-
-    // Analyze posture with basic form analysis
-    const analysis = poseDetectionService.analyzePosture(finalPose, exercise);
-    
-    // Apply Personal Image Classifier (PIC) Analysis
-    const personalInsights = poseDetectionService.analyzePersonalPosePattern(
-      finalPose, 
-      exercise, 
-      scores
-    );
-    
-    const enhancedAnalysis = {
-      ...analysis,
-      personalizedInsights: personalInsights,
-    };
-    
-    setPostureAnalysis(enhancedAnalysis);
-
-    // Track scores
-    if (isActive) {
-      setScores((prev) => [...prev, analysis.score]);
     }
   };
 
-  // Rep counting logic with hysteresis (prevents false counts from minor movements)
-  const countReps = (pose: Pose) => {
-    if (!isActive) return;
-
-    const exerciseLower = exercise.toLowerCase();
-    
-    // Get keypoints (bilateral for better accuracy)
-    const leftShoulder = pose.keypoints.find(kp => kp.name === 'left_shoulder');
-    const leftElbow = pose.keypoints.find(kp => kp.name === 'left_elbow');
-    const leftWrist = pose.keypoints.find(kp => kp.name === 'left_wrist');
-    const leftHip = pose.keypoints.find(kp => kp.name === 'left_hip');
-    const leftKnee = pose.keypoints.find(kp => kp.name === 'left_knee');
-    const leftAnkle = pose.keypoints.find(kp => kp.name === 'left_ankle');
-    
-    const rightShoulder = pose.keypoints.find(kp => kp.name === 'right_shoulder');
-    const rightElbow = pose.keypoints.find(kp => kp.name === 'right_elbow');
-    const rightWrist = pose.keypoints.find(kp => kp.name === 'right_wrist');
-    const rightHip = pose.keypoints.find(kp => kp.name === 'right_hip');
-    const rightKnee = pose.keypoints.find(kp => kp.name === 'right_knee');
-    const rightAnkle = pose.keypoints.find(kp => kp.name === 'right_ankle');
-
-    if (exerciseLower.includes('curl') || exerciseLower.includes('bicep')) {
-      // Bicep curl counting with bilateral tracking and velocity analysis
-      if (leftShoulder && leftElbow && leftWrist && rightShoulder && rightElbow && rightWrist) {
-        const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
-        const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
-        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
-        
-        // Velocity tracking
-        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = avgAngle;
-        
-        // Extended position (arm straight)
-        if (avgAngle > 160 && repStage !== 'down') {
-          setRepStage('down');
-          lastRepAngleRef.current = avgAngle;
-        }
-        // Contracted position (arm bent) - requires significant angle change
-        if (avgAngle < 40 && repStage === 'down' && (lastRepAngleRef.current - avgAngle) > 120) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 20) { // Not rushing
-            setRepStage('up');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = avgAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    } else if (exerciseLower.includes('squat')) {
-      // Squat counting with bilateral tracking and velocity analysis
-      if (leftHip && leftKnee && leftAnkle && rightHip && rightKnee && rightAnkle) {
-        const leftAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
-        const rightAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
-        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
-        
-        // Velocity tracking
-        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = avgAngle;
-        
-        // Standing position
-        if (avgAngle > 160 && repStage !== 'up') {
-          setRepStage('up');
-          lastRepAngleRef.current = avgAngle;
-        }
-        // Squat position - requires going below 100° from standing
-        if (avgAngle < 100 && repStage === 'up' && (lastRepAngleRef.current - avgAngle) > 60) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 15) { // Not rushing
-            setRepStage('down');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = avgAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    } else if (exerciseLower.includes('push')) {
-      // Push-up counting with bilateral tracking and velocity analysis
-      if (leftShoulder && leftElbow && leftWrist && rightShoulder && rightElbow && rightWrist) {
-        const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
-        const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
-        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
-        
-        // Velocity tracking
-        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = avgAngle;
-        
-        // Extended position (plank)
-        if (avgAngle > 160 && repStage !== 'up') {
-          setRepStage('up');
-          lastRepAngleRef.current = avgAngle;
-        }
-        // Lowered position - requires going below 90° from plank
-        if (avgAngle < 90 && repStage === 'up' && (lastRepAngleRef.current - avgAngle) > 70) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 15) { // Not rushing
-            setRepStage('down');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = avgAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    } else if (exerciseLower.includes('lunge')) {
-      // Lunge counting with bilateral tracking
-      if (leftHip && leftKnee && leftAnkle && rightHip && rightKnee && rightAnkle) {
-        const leftAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
-        const rightAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
-        const frontAngle = Math.min(leftAngle, rightAngle); // Front leg (more bent)
-        
-        // Velocity tracking
-        const angleChange = Math.abs(frontAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = frontAngle;
-        
-        // Standing position
-        if (frontAngle > 150 && repStage !== 'up') {
-          setRepStage('up');
-          lastRepAngleRef.current = frontAngle;
-        }
-        // Lunge position - requires going below 90° from standing
-        if (frontAngle < 90 && repStage === 'up' && (lastRepAngleRef.current - frontAngle) > 60) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 15) { // Not rushing
-            setRepStage('down');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = frontAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    }
-  };
-
-  const handleStartStop = async () => {
+  const handleStartStop = () => {
     if (isActive) {
-      // Stop and show summary
       finishWorkout();
     } else {
-      // Initialize detector on first play (lazy loading)
-      if (!isDetectorReady) {
-        const initialized = await initializeDetector();
-        if (!initialized) {
-          return; // Initialization failed, don't start workout
-        }
-      }
-      
-      // Start workout
       setIsActive(true);
       setTimeElapsed(0);
-      setScores([]);
       setRepCount(0);
-      setRepStage(null);
     }
   };
 
   const finishWorkout = async () => {
     setIsActive(false);
-
-    const averageScore = scores.length > 0
-      ? scores.reduce((a, b) => a + b, 0) / scores.length
-      : 0;
+    stopTimer();
 
     const sessionData = {
       id: Date.now().toString(),
       exerciseName: exercise,
       date: new Date().toISOString(),
       duration: timeElapsed,
-      averageScore: Math.round(averageScore),
-      reps: repCount, // Include rep count in session data
-      mistakes: postureAnalysis?.mistakes || [],
-      feedback: [...(postureAnalysis?.feedback || []), ...(postureAnalysis?.personalizedInsights || [])],
+      averageScore: 0, // PoseTracker will handle scoring
+      reps: repCount,
+      mistakes: [],
+      feedback: ['Workout completed using PoseTracker'],
       timestamp: Date.now(),
     };
 
@@ -749,13 +156,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 
   const cleanup = () => {
     stopTimer();
-    stopPoseDetection();
-    isCapturingRef.current = false;
-    captureFailCountRef.current = 0;
-    frameCountRef.current = 0;
-    setIsRecording(false);
-    setCameraReady(false);
-    poseDetectionService.dispose();
+    poseTrackerService.reset();
   };
 
   const formatTime = (seconds: number): string => {
@@ -764,249 +165,6 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Calculate angle between three keypoints (like in MediaPipe tutorial)
-  const calculateAngle = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number => {
-    const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
-    let angle = Math.abs((radians * 180.0) / Math.PI);
-    if (angle > 180.0) {
-      angle = 360 - angle;
-    }
-    return angle;
-  };
-
-  // Render angle annotations (like MediaPipe tutorial)
-  const renderAngles = () => {
-    if (!currentPose) return null;
-
-    const getKeypoint = (name: string) =>
-      currentPose.keypoints.find((kp) => kp.name === name);
-
-    const angles = [];
-
-    // Left elbow angle
-    const shoulder = getKeypoint('left_shoulder');
-    const elbow = getKeypoint('left_elbow');
-    const wrist = getKeypoint('left_wrist');
-    
-    if (shoulder && elbow && wrist && shoulder.score && elbow.score && wrist.score &&
-        shoulder.score > 0.3 && elbow.score > 0.3 && wrist.score > 0.3) {
-      const elbowAngle = calculateAngle(shoulder, elbow, wrist);
-      angles.push(
-        <View
-          key="left-elbow-angle"
-          style={[
-            styles.angleLabel,
-            { left: elbow.x - 20, top: elbow.y - 30 }
-          ]}
-        >
-          <Text style={styles.angleLabelText}>{Math.round(elbowAngle)}°</Text>
-        </View>
-      );
-    }
-
-    // Left knee angle
-    const hip = getKeypoint('left_hip');
-    const knee = getKeypoint('left_knee');
-    const ankle = getKeypoint('left_ankle');
-    
-    if (hip && knee && ankle && hip.score && knee.score && ankle.score &&
-        hip.score > 0.3 && knee.score > 0.3 && ankle.score > 0.3) {
-      const kneeAngle = calculateAngle(hip, knee, ankle);
-      angles.push(
-        <View
-          key="left-knee-angle"
-          style={[
-            styles.angleLabel,
-            { left: knee.x - 20, top: knee.y - 30 }
-          ]}
-        >
-          <Text style={styles.angleLabelText}>{Math.round(kneeAngle)}°</Text>
-        </View>
-      );
-    }
-
-    return <>{angles}</>;
-  };
-
-  const renderSkeleton = () => {
-    if (!currentPose) return null;
-
-    // MediaPipe/MoveNet connections with thickness based on importance
-    const connections: Array<[string, string, number]> = [
-      // Core body (thickest - most important)
-      ['left_shoulder', 'right_shoulder', 5],
-      ['left_shoulder', 'left_hip', 5],
-      ['right_shoulder', 'right_hip', 5],
-      ['left_hip', 'right_hip', 5],
-      
-      // Arms (medium thickness)
-      ['left_shoulder', 'left_elbow', 4],
-      ['left_elbow', 'left_wrist', 4],
-      ['right_shoulder', 'right_elbow', 4],
-      ['right_elbow', 'right_wrist', 4],
-      
-      // Legs (medium thickness)
-      ['left_hip', 'left_knee', 4],
-      ['left_knee', 'left_ankle', 4],
-      ['right_hip', 'right_knee', 4],
-      ['right_knee', 'right_ankle', 4],
-      
-      // Face (thin)
-      ['nose', 'left_eye', 2],
-      ['nose', 'right_eye', 2],
-      ['left_eye', 'left_ear', 2],
-      ['right_eye', 'right_ear', 2],
-      
-      // Hands (thin)
-      ['left_wrist', 'left_index', 3],
-      ['right_wrist', 'right_index', 3],
-      
-      // Feet (thin)
-      ['left_ankle', 'left_heel', 3],
-      ['left_ankle', 'left_foot_index', 3],
-      ['right_ankle', 'right_heel', 3],
-      ['right_ankle', 'right_foot_index', 3],
-    ];
-
-    const getKeypoint = (name: string) => {
-      const kp = currentPose.keypoints.find((k) => k.name === name);
-      // Enhanced confidence threshold - only show if score > 0.45
-      if (kp && kp.score && kp.score > 0.45) {
-        return kp;
-      }
-      return null;
-    };
-
-    // Dynamic colors based on form quality AND confidence
-    const getConnectionColor = (score1: number, score2: number) => {
-      const avgConfidence = (score1 + score2) / 2;
-      const formQuality = postureAnalysis?.color;
-      
-      // Low confidence = desaturated color
-      if (avgConfidence < 0.6) {
-        return `rgba(200, 200, 200, ${avgConfidence})`;
-      }
-      
-      // High confidence = vivid colors based on form
-      if (formQuality === 'green') {
-        return `rgba(86, 232, 160, ${Math.min(avgConfidence * 1.2, 1)})`; // Bright green
-      } else if (formQuality === 'yellow') {
-        return `rgba(232, 201, 86, ${Math.min(avgConfidence * 1.2, 1)})`; // Bright yellow
-      } else {
-        return `rgba(232, 86, 157, ${Math.min(avgConfidence * 1.2, 1)})`; // Bright pink
-      }
-    };
-
-    const getJointColor = (score: number) => {
-      const formQuality = postureAnalysis?.color;
-      
-      // Confidence-based opacity
-      const opacity = Math.min(score * 1.3, 1);
-      
-      if (score < 0.5) {
-        return `rgba(150, 150, 150, ${opacity})`;
-      }
-      
-      if (formQuality === 'green') {
-        return `rgba(245, 66, 230, ${opacity})`; // MediaPipe magenta
-      } else if (formQuality === 'yellow') {
-        return `rgba(245, 180, 66, ${opacity})`;
-      } else {
-        return `rgba(245, 66, 130, ${opacity})`;
-      }
-    };
-
-    return (
-      <Svg style={styles.skeletonOverlay}>
-        {/* Draw connections first (behind joints) */}
-        {connections.map(([start, end, baseThickness], index) => {
-          const startKp = getKeypoint(start);
-          const endKp = getKeypoint(end);
-          
-          // Skip if either keypoint is missing or low confidence
-          if (!startKp || !endKp || !startKp.score || !endKp.score) return null;
-          
-          const avgConfidence = (startKp.score + endKp.score) / 2;
-          // Only draw connections with decent confidence
-          if (avgConfidence < 0.45) return null;
-          
-          // Additional validation for coordinate sanity
-          if (startKp.x < 0 || startKp.y < 0 || endKp.x < 0 || endKp.y < 0) return null;
-          if (startKp.x > SCREEN_WIDTH || startKp.y > CAMERA_HEIGHT || 
-              endKp.x > SCREEN_WIDTH || endKp.y > CAMERA_HEIGHT) return null;
-
-          // Thickness varies with confidence
-          const thickness = baseThickness * Math.min(avgConfidence * 1.5, 1.2);
-
-          return (
-            <SvgLine
-              key={`line-${index}`}
-              x1={startKp.x}
-              y1={startKp.y}
-              x2={endKp.x}
-              y2={endKp.y}
-              stroke={getConnectionColor(startKp.score, endKp.score)}
-              strokeWidth={thickness}
-              strokeLinecap="round"
-            />
-          );
-        })}
-        {/* Draw joints on top */}
-        {currentPose.keypoints.map((kp, index) => {
-          // Only render high-confidence keypoints within screen bounds
-          if (!kp.score || kp.score < 0.45) return null;
-          if (kp.x < 0 || kp.y < 0 || kp.x > SCREEN_WIDTH || kp.y > CAMERA_HEIGHT) return null;
-          
-          // Joint size based on confidence
-          const radius = 7 * Math.min(kp.score * 1.3, 1.1);
-          
-          return (
-            <SvgCircle
-              key={`joint-${index}`}
-              cx={kp.x}
-              cy={kp.y}
-              r={radius}
-              fill={getJointColor(kp.score)}
-              stroke="rgba(255, 255, 255, 0.8)"
-              strokeWidth={2}
-            />
-          );
-        })}
-      </Svg>
-    );
-  };
-
-  const smoothedPose = useMemo(() => {
-    if (!currentPose) return null;
-    return currentPose; // Already smoothed by temporal averaging
-  }, [currentPose]);
-
-  const skeletonElements = useMemo(() => {
-    if (!smoothedPose) return null;
-    return renderSkeleton();
-  }, [smoothedPose, postureAnalysis?.color]);
-
-  if (!permission) {
-    return (
-      <View style={styles.centerContainer}>
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Requesting camera permission...</Text>
-      </View>
-    );
-  }
-
-  if (!permission.granted) {
-    return (
-      <View style={styles.centerContainer}>
-        <Ionicons name="camera-outline" size={64} color={colors.gray400} />
-        <Text style={styles.errorText}>Camera permission required</Text>
-        <TouchableOpacity style={styles.retryButton} onPress={initializeCamera}>
-          <Text style={styles.retryButtonText}>Grant Permission</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
@@ -1014,112 +172,26 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           <Ionicons name="close" size={28} color={colors.white} />
         </TouchableOpacity>
         <Text style={styles.exerciseTitle}>{exercise}</Text>
-        <View style={styles.recordingIndicator}>
-          {isRecording && (
-            <View style={styles.recordingDot} />
-          )}
-        </View>
+        <View style={styles.headerSpacer} />
       </View>
 
-      <View style={styles.cameraContainer}>
-        <CameraView
-          ref={cameraRef}
-          style={styles.camera}
-          facing="front"
-          onCameraReady={() => {
-            console.log('Camera ready for video capture');
-            setCameraReady(true);
-          }}
-        />
-        {skeletonElements}
-        {renderAngles()}
-
-        {/* Score Indicator */}
-        {postureAnalysis && (
-          <View
-            accessible={true}
-            accessibilityLabel={`Form score: ${Math.round(postureAnalysis.score)} out of 100`}
-            style={[
-              styles.scoreIndicator,
-              {
-                backgroundColor:
-                  postureAnalysis.color === 'green'
-                    ? '#56E8A050'
-                    : postureAnalysis.color === 'yellow'
-                    ? '#E8C95650'
-                    : '#E8569D50',
-              },
-            ]}
-          >
-            <Text style={styles.scoreText}>{Math.round(postureAnalysis.score)}</Text>
-            <Text style={styles.scoreLabel}>Score</Text>
-          </View>
-        )}
-
-        {/* Rep Counter Box (like MediaPipe tutorial) */}
-        {isActive && (
-          <View style={styles.repCounterBox}>
-            <View style={styles.repCounterSection}>
-              <Text style={styles.repCounterLabel}>REPS</Text>
-              <Text style={styles.repCounterValue}>{repCount}</Text>
-            </View>
-            <View style={[styles.repCounterSection, { marginLeft: 20 }]}>
-              <Text style={styles.repCounterLabel}>STAGE</Text>
-              <Text style={styles.repCounterValue}>{repStage || '-'}</Text>
-            </View>
-          </View>
-        )}
-
-        {/* Detection Mode Indicator */}
-        {isActive && (
-          <View style={styles.modeIndicator}>
-            <Ionicons 
-              name={detectionMode === 'api' ? 'cloud' : detectionMode === 'local' ? 'hardware-chip' : 'videocam'} 
-              size={14} 
-              color={detectionMode === 'api' ? '#56E8A0' : detectionMode === 'local' ? '#7556E8' : '#E8C956'} 
-            />
-            <Text style={[
-              styles.modeText,
-              { color: detectionMode === 'api' ? '#56E8A0' : detectionMode === 'local' ? '#7556E8' : '#E8C956' }
-            ]}>
-              {detectionMode === 'api' ? 'Real-Time AI' : detectionMode === 'local' ? 'Local ML' : 'Demo Mode'}
+      <View style={styles.webViewContainer}>
+        {isActive ? (
+          <PoseTrackerWebView
+            exercise={exercise}
+            apiKey={POSETRACKER_API_KEY}
+            onRepsChange={handleRepsChange}
+            onStatusChange={handleStatusChange}
+            onDataReceived={handlePoseTrackerData}
+            difficulty="medium"
+          />
+        ) : (
+          <View style={styles.placeholderContainer}>
+            <Ionicons name="camera" size={64} color={colors.primary} />
+            <Text style={styles.placeholderText}>Press Play to Start Workout</Text>
+            <Text style={styles.placeholderSubtext}>
+              Using PoseTracker for real-time pose detection
             </Text>
-          </View>
-        )}
-
-        {/* Feedback Box */}
-        {postureAnalysis && isActive && (
-          <View 
-            style={styles.feedbackBox}
-            accessible={true}
-            accessibilityRole="alert"
-            accessibilityLiveRegion="polite"
-          >
-            {postureAnalysis.isCorrect ? (
-              <View style={styles.feedbackRow}>
-                <Ionicons name="checkmark-circle" size={24} color="#56E8A0" />
-                <Text style={styles.feedbackTextGood}>Perfect Form!</Text>
-              </View>
-            ) : (
-              <View>
-                {postureAnalysis.mistakes.slice(0, 2).map((mistake, index) => (
-                  <View key={index} style={styles.feedbackRow}>
-                    <Ionicons name="alert-circle" size={20} color="#E8C956" />
-                    <Text style={styles.feedbackTextWarning}>{mistake}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-            {/* Show PIC personalized insights */}
-            {postureAnalysis.personalizedInsights && postureAnalysis.personalizedInsights.length > 0 && (
-              <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#ffffff20' }}>
-                {postureAnalysis.personalizedInsights.slice(0, 1).map((insight, index) => (
-                  <View key={index} style={styles.feedbackRow}>
-                    <Text style={[styles.feedbackTextWarning, { fontSize: 11 }]}>{insight}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
           </View>
         )}
       </View>
@@ -1131,30 +203,19 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
         </View>
 
         <TouchableOpacity
-          style={[
-            styles.actionButton, 
-            isActive && styles.stopButton,
-            isInitializing && styles.initializingButton
-          ]}
+          style={[styles.actionButton, isActive && styles.stopButton]}
           onPress={handleStartStop}
-          disabled={isInitializing}
         >
-          {isInitializing ? (
-            <ActivityIndicator size={32} color={colors.white} />
-          ) : (
-            <Ionicons
-              name={isActive ? 'stop' : 'play'}
-              size={32}
-              color={colors.white}
-            />
-          )}
+          <Ionicons
+            name={isActive ? 'stop' : 'play'}
+            size={32}
+            color={colors.white}
+          />
         </TouchableOpacity>
 
         {isActive && (
           <View style={styles.statsContainer}>
-            <Text style={styles.statsText}>
-              Avg: {scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b) / scores.length) : 0}
-            </Text>
+            <Text style={styles.statsText}>Reps: {repCount}</Text>
           </View>
         )}
       </View>
@@ -1166,13 +227,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
-  },
-  centerContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: colors.background,
-    padding: spacing.xl,
   },
   header: {
     flexDirection: 'row',
@@ -1193,227 +247,81 @@ const styles = StyleSheet.create({
     fontSize: fontSize.xl,
     fontWeight: '700',
     color: colors.textPrimary,
+    flex: 1,
+    textAlign: 'center',
   },
-  cameraContainer: {
-    height: CAMERA_HEIGHT,
-    width: SCREEN_WIDTH - (spacing.sm * 2),
-    position: 'relative',
-    backgroundColor: colors.cardBg,
+  headerSpacer: {
+    width: 40,
+  },
+  webViewContainer: {
+    flex: 1,
     marginHorizontal: spacing.sm,
     marginVertical: spacing.xs,
     borderRadius: 16,
     overflow: 'hidden',
-    alignSelf: 'center',
+    backgroundColor: colors.cardBg,
   },
-  camera: {
-    width: '100%',
-    height: '100%',
-  },
-  skeletonOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: SCREEN_WIDTH,
-    height: CAMERA_HEIGHT,
-  },
-  scoreIndicator: {
-    position: 'absolute',
-    top: spacing.lg,
-    right: spacing.lg,
-    padding: spacing.md,
-    borderRadius: 15,
-    alignItems: 'center',
-    minWidth: 80,
-  },
-  scoreText: {
-    fontSize: 32,
-    fontWeight: '800',
-    color: colors.white,
-  },
-  scoreLabel: {
-    fontSize: fontSize.sm,
-    color: colors.white,
-    opacity: 0.9,
-  },
-  repCounterBox: {
-    position: 'absolute',
-    top: spacing.lg,
-    left: spacing.lg,
-    backgroundColor: 'rgba(245, 117, 16, 0.9)',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    flexDirection: 'row',
-    minWidth: 180,
-  },
-  repCounterSection: {
-    alignItems: 'flex-start',
-  },
-  repCounterLabel: {
-    fontSize: 11,
-    color: 'rgba(0, 0, 0, 0.8)',
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  repCounterValue: {
-    fontSize: 28,
-    color: colors.white,
-    fontWeight: '800',
-    lineHeight: 32,
-  },
-  feedbackBox: {
-    position: 'absolute',
-    bottom: spacing.lg,
-    left: spacing.lg,
-    right: spacing.lg,
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    padding: spacing.md,
-    borderRadius: 15,
-  },
-  feedbackRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginVertical: 4,
-  },
-  feedbackTextGood: {
-    fontSize: fontSize.md,
-    color: '#56E8A0',
-    fontWeight: '600',
+  placeholderContainer: {
     flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    gap: spacing.md,
   },
-  feedbackTextWarning: {
+  placeholderText: {
+    fontSize: fontSize.lg,
+    fontWeight: '600',
+    color: colors.textPrimary,
+    textAlign: 'center',
+  },
+  placeholderSubtext: {
     fontSize: fontSize.sm,
-    color: '#E8C956',
-    flex: 1,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    paddingHorizontal: spacing.lg,
   },
   controls: {
-    padding: spacing.xl,
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.lg,
     gap: spacing.lg,
+    backgroundColor: colors.cardBg,
   },
   timerContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
+    gap: spacing.sm,
   },
   timerText: {
-    fontSize: 48,
-    fontWeight: '800',
+    fontSize: fontSize.lg,
+    fontWeight: '700',
     color: colors.textPrimary,
   },
   actionButton: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
     elevation: 5,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
   },
   stopButton: {
     backgroundColor: '#E8569D',
   },
-  initializingButton: {
-    backgroundColor: '#7556E8',
-    opacity: 0.8,
-  },
-  disabledButton: {
-    backgroundColor: colors.gray400,
-    opacity: 0.6,
-  },
-  initializingText: {
-    fontSize: 10,
-    color: colors.white,
-    marginTop: 4,
-    fontWeight: '600',
-  },
   statsContainer: {
-    padding: spacing.md,
-    backgroundColor: colors.cardBg,
-    borderRadius: 15,
+    flex: 1,
+    alignItems: 'flex-end',
   },
   statsText: {
-    fontSize: fontSize.lg,
+    fontSize: fontSize.md,
+    fontWeight: '600',
     color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  loadingText: {
-    marginTop: spacing.lg,
-    fontSize: fontSize.md,
-    color: colors.gray400,
-    fontWeight: '600',
-  },
-  loadingSubtext: {
-    marginTop: spacing.sm,
-    fontSize: fontSize.sm,
-    color: colors.gray400,
-    textAlign: 'center',
-    paddingHorizontal: spacing.xl,
-  },
-  errorText: {
-    marginTop: spacing.lg,
-    fontSize: fontSize.lg,
-    color: colors.gray400,
-    textAlign: 'center',
-  },
-  retryButton: {
-    marginTop: spacing.xl,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.xl,
-    backgroundColor: colors.primary,
-    borderRadius: 25,
-  },
-  retryButtonText: {
-    fontSize: fontSize.md,
-    color: colors.white,
-    fontWeight: '600',
-  },
-  recordingIndicator: {
-    width: 40,
-    height: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  recordingDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#E8569D',
-  },
-  modeIndicator: {
-    position: 'absolute',
-    top: spacing.lg,
-    left: spacing.lg,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    gap: 5,
-  },
-  modeText: {
-    color: '#56E8A0',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  angleLabel: {
-    position: 'absolute',
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.8)',
-  },
-  angleLabelText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: 'bold',
   },
 });
