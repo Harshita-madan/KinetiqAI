@@ -40,7 +40,7 @@ export default function App() {
       clearTimeout(timer);
       NotificationService.stopUsageTracking();
     };
-  }, [initializeAuth]);
+  }, []);
 
   // Skip TensorFlow pre-initialization - let LiveWorkoutScreen load it only when needed
   // This optimization saves ~15 seconds startup time when backend is available
