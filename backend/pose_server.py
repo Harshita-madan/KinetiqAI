@@ -539,12 +539,11 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
+        scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     """Analyze lunge form with bilateral assessment."""
     score = 100
     mistakes = []
     feedback = []
-    
-    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     
     left_hip = get_keypoint(keypoints, 'left_hip')
     left_knee = get_keypoint(keypoints, 'left_knee')
@@ -604,12 +603,11 @@ def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_pushup(keypoints: List[Keypoint]) -> PostureAnalysis:
+        scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     """Analyze push-up form with bilateral assessment."""
     score = 100
     mistakes = []
     feedback = []
-    
-    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     
     left_shoulder = get_keypoint(keypoints, 'left_shoulder')
     left_elbow = get_keypoint(keypoints, 'left_elbow')
@@ -665,12 +663,11 @@ def analyze_pushup(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_general(keypoints: List[Keypoint]) -> PostureAnalysis:
+        scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     """General posture analysis."""
     score = 85
     feedback = ["Pose detected successfully"]
     mistakes = []
-    
-    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     
     left_shoulder = get_keypoint(keypoints, 'left_shoulder')
     right_shoulder = get_keypoint(keypoints, 'right_shoulder')
