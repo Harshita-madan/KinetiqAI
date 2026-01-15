@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { spacing, borderRadius, fontSize, fontWeight, useTheme, ThemeColors } from '../theme';
+import StreakBadge from '../components/StreakBadge';
 import { Card, Avatar, Button } from '../components';
 
 interface QuickActionProps {
@@ -56,6 +57,24 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const { colors, isDarkMode } = useTheme();
   const userName = 'User';
 
+  // Streak state
+  const [streakCount, setStreakCount] = React.useState<number>(0);
+
+  React.useEffect(() => {
+    let unsub: (() => void) | null = null;
+    (async () => {
+      const StreakManager = await import('../services/StreakManager');
+      await StreakManager.default.init();
+      const s = StreakManager.default.getState();
+      setStreakCount(s.streakCount || 0);
+      unsub = StreakManager.default.addListener((state: any) => {
+        setStreakCount(state.streakCount || 0);
+      });
+    })();
+
+    return () => { if (unsub) unsub(); };
+  }, []);
+
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top']}>
       <StatusBar barStyle={isDarkMode ? "light-content" : "dark-content"} backgroundColor={colors.background} />
@@ -70,9 +89,14 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             <Text style={[styles.greeting, { color: colors.textSecondary }]}>Hello,</Text>
             <Text style={[styles.userName, { color: colors.textPrimary }]}>{userName} 👋</Text>
           </View>
-          <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
-            <Avatar name={userName} size="md" showBadge badgeColor={colors.success} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {/* Streak badge */}
+            {/* We lazy-load the component to avoid impacting startup */}
+            <View style={{ marginRight: 8 }}><StreakBadge count={streakCount} /></View>
+            <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
+              <Avatar name={userName} size="md" showBadge badgeColor={colors.success} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Hero Card */}

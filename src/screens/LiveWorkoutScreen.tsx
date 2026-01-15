@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
+  Switch,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -16,6 +17,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { poseDetectionService, Pose, PostureAnalysis } from '../services/PoseDetectionService';
 import { poseAPIService } from '../services/PoseAPIService';
 import { storageService } from '../services/StorageService';
+import voiceManager from '../services/VoiceFeedbackManager';
+import StreakCelebration from '../components/StreakCelebration';
 import { colors, spacing, fontSize } from '../theme';
 import { useNavigation, useRoute, CommonActions } from '@react-navigation/native';
 import Svg, { Line as SvgLine, Circle as SvgCircle } from 'react-native-svg';
@@ -48,6 +51,11 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   const [cameraReady, setCameraReady] = useState(false);
   const [repCount, setRepCount] = useState(0);
   const [repStage, setRepStage] = useState<'up' | 'down' | null>(null);
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(voiceManager.isEnabled());
+
+  // Single source-of-truth feedback state (shared between UI and TTS)
+  const [feedbackState, setFeedbackState] = useState<{ text: string | null; priority: 0 | 1 | 2 }>({ text: null, priority: 0 });
+  const feedbackRef = useRef<string | null>(null);
   
   // Temporal smoothing for skeleton
   const poseHistoryRef = useRef<Pose[]>([]);
@@ -76,6 +84,10 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     if (!permission) {
       requestPermission();
     }
+
+    // Sync voice enabled state from manager (manager may have loaded persisted pref)
+    setVoiceEnabled(voiceManager.isEnabled());
+
     return () => {
       cleanup();
     };
@@ -88,6 +100,28 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     } else {
       stopTimer();
       stopPoseDetection();
+    }
+  }, [isActive]);
+
+  // Speak only when the feedback message changes (single source-of-truth)
+  useEffect(() => {
+    if (!isActive) return;
+    if (!feedbackState.text) return;
+
+    // Non-blocking: manager will handle throttling/dedup and cancellation
+    try {
+      voiceManager.speakText(feedbackState.text, feedbackState.priority);
+    } catch (e) {
+      // swallow errors so TTS can't crash the session
+      console.error('Voice speak error:', e);
+    }
+  }, [feedbackState.text, feedbackState.priority, isActive]);
+
+  // Clear voice on session end or pause
+  useEffect(() => {
+    if (!isActive) {
+      try { voiceManager.cancel(); } catch (e) {}
+      setFeedbackState({ text: null, priority: 0 });
     }
   }, [isActive]);
 
@@ -257,6 +291,10 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     }
     setIsRecording(false);
     console.log(`Stopped detection after ${frameCountRef.current} frames`);
+
+    // Stop any in-progress speech and clear feedback when detection stops
+    try { voiceManager.cancel(); } catch (e) {}
+    setFeedbackState({ text: null, priority: 0 });
   };
 
   // Backend API detection - works on both web and mobile
@@ -278,6 +316,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           base64: true,
           skipProcessing: true,
           exif: false,
+          shutterSound: false, // Ensure no system shutter sound when taking snapshots
         };
         
         // Capture with longer timeout for Full model processing
@@ -539,6 +578,29 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     
     setPostureAnalysis(enhancedAnalysis);
 
+    // Compute a single source-of-truth feedback message (UI + TTS)
+    try {
+      const { message, priority } = (() => {
+        if (enhancedAnalysis.mistakes && enhancedAnalysis.mistakes.length > 0) {
+          return { message: voiceManager.formatMessage(enhancedAnalysis.mistakes[0]), priority: 2 as const };
+        }
+        if (enhancedAnalysis.feedback && enhancedAnalysis.feedback.length > 0) {
+          return { message: voiceManager.formatMessage(enhancedAnalysis.feedback[0]), priority: 1 as const };
+        }
+        if (enhancedAnalysis.isCorrect || (typeof enhancedAnalysis.score === 'number' && enhancedAnalysis.score > 85)) {
+          return { message: voiceManager.formatMessage('Perfect Form!'), priority: 0 as const };
+        }
+        return { message: null, priority: 0 as const };
+      })();
+
+      // Only update feedback state when the message actually changes to avoid
+      // triggering speech on every frame (debounce by state change).
+      if (message !== feedbackRef.current) {
+        feedbackRef.current = message;
+        setFeedbackState({ text: message, priority });
+      }
+    } catch (e) {}
+
     // Track scores
     if (isActive) {
       setScores((prev) => [...prev, analysis.score]);
@@ -732,6 +794,25 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 
     await storageService.saveSession(sessionData);
 
+    // Update streak - show celebration on increment (non-blocking)
+    try {
+      const StreakMgr = (await import('../services/StreakManager')).default;
+      const { didIncrement, streak } = await StreakMgr.onWorkoutCompleted();
+      if (didIncrement) {
+        // show celebration overlay in this screen (non-blocking)
+        setShowStreakCelebration(true);
+        setCelebrationDays(streak);
+        // Auto-dismiss after ~2.5s
+        setTimeout(() => {
+          setShowStreakCelebration(false);
+          navigation.navigate('SessionSummary', { session: sessionData });
+        }, 2500);
+        return;
+      }
+    } catch (e) {
+      // if streak manager fails, continue to summary
+    }
+
     navigation.navigate('SessionSummary', { session: sessionData });
   };
 
@@ -763,9 +844,11 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   };
 
   // Render angle annotations (like MediaPipe tutorial)
+  const [showStreakCelebration, setShowStreakCelebration] = React.useState(false);
+  const [celebrationDays, setCelebrationDays] = React.useState(0);
+
   const renderAngles = () => {
     if (!currentPose) return null;
-
     const getKeypoint = (name: string) =>
       currentPose.keypoints.find((kp) => kp.name === name);
 
@@ -794,6 +877,12 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 
     // Left knee angle
     const hip = getKeypoint('left_hip');
+
+    // Celebration overlay (rendered at top level of screen)
+    // added near renderAngles so optical layering is consistent
+    // (the component itself is absolute full-screen)
+    // Rendered conditionally below the skeleton/UI elements
+    return null;
     const knee = getKeypoint('left_knee');
     const ankle = getKeypoint('left_ankle');
     
@@ -1038,6 +1127,20 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           </View>
         )}
 
+        {/* Voice toggle */}
+        {isActive && (
+          <View style={styles.voiceToggleBox}>
+            <Text style={{ marginRight: 8, color: colors.white }}>Voice</Text>
+            <Switch
+              value={voiceEnabled}
+              onValueChange={(val) => {
+                setVoiceEnabled(val);
+                voiceManager.setEnabled(val);
+              }}
+            />
+          </View>
+        )}
+
         {/* Feedback Box */}
         {postureAnalysis && isActive && (
           <View 
@@ -1049,16 +1152,23 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
             {postureAnalysis.isCorrect ? (
               <View style={styles.feedbackRow}>
                 <Ionicons name="checkmark-circle" size={24} color="#56E8A0" />
-                <Text style={styles.feedbackTextGood}>Perfect Form!</Text>
+                <Text style={styles.feedbackTextGood}>{feedbackState.text || 'Perfect Form!'}</Text>
               </View>
             ) : (
               <View>
-                {postureAnalysis.mistakes.slice(0, 2).map((mistake, index) => (
-                  <View key={index} style={styles.feedbackRow}>
+                {feedbackState.text ? (
+                  <View style={styles.feedbackRow}>
                     <Ionicons name="alert-circle" size={20} color="#E8C956" />
-                    <Text style={styles.feedbackTextWarning}>{mistake}</Text>
+                    <Text style={styles.feedbackTextWarning}>{feedbackState.text}</Text>
                   </View>
-                ))}
+                ) : (
+                  postureAnalysis.mistakes.slice(0, 2).map((mistake, index) => (
+                    <View key={index} style={styles.feedbackRow}>
+                      <Ionicons name="alert-circle" size={20} color="#E8C956" />
+                      <Text style={styles.feedbackTextWarning}>{mistake}</Text>
+                    </View>
+                  ))
+                )}
               </View>
             )}
             {/* Show PIC personalized insights */}
@@ -1072,6 +1182,11 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
               </View>
             )}
           </View>
+        )}
+
+        {/* Streak celebration overlay */}
+        {showStreakCelebration && (
+          <StreakCelebration visible={showStreakCelebration} days={celebrationDays} onDismiss={() => setShowStreakCelebration(false)} />
         )}
       </View>
 
@@ -1218,10 +1333,19 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     borderRadius: 15,
   },
+  voiceToggleBox: {
+    position: 'absolute',
+    top: spacing.xl + 8,
+    right: spacing.lg,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    padding: spacing.sm,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   feedbackRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
     marginVertical: 4,
   },
   feedbackTextGood: {

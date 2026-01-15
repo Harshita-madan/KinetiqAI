@@ -15,8 +15,7 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "KinetiqAI needs camera access to detect your pose and provide real-time workout feedback.",
-        "NSMicrophoneUsageDescription": "KinetiqAI may use the microphone for audio feedback during workouts."
+        "NSCameraUsageDescription": "KinetiqAI needs camera access to detect your pose and provide real-time workout feedback."
       }
     },
     "android": {
@@ -27,8 +26,7 @@
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "CAMERA",
-        "RECORD_AUDIO"
+        "CAMERA"
       ]
     },
     "web": {
@@ -39,8 +37,7 @@
         "expo-camera",
         {
           "cameraPermission": "KinetiqAI needs camera access to detect your pose and provide real-time workout feedback.",
-          "microphonePermission": "KinetiqAI may use the microphone for audio feedback during workouts.",
-          "recordAudioAndroid": true
+          "recordAudioAndroid": false
         }
       ]
     ]
