@@ -4,6 +4,7 @@ import { AppNavigator } from './src/navigation';
 import { ThemeProvider } from './src/theme';
 import { NotificationService } from './src/services';
 import { initializeOnDemandChatbot } from './src/services/OnDemandChatbotService';
+import { useAuthStore } from './src/stores';
 
 // Ignore the Expo Go notification warning (SDK 53+ limitation)
 LogBox.ignoreLogs([
@@ -16,8 +17,13 @@ LogBox.ignoreLogs([
 const ONDEMAND_API_KEY: string = 'IDhwtqWIap55xKVs4ncupNkALIOD80Gw';
 
 export default function App() {
+  const initializeAuth = useAuthStore((state) => state.initialize);
+
   // Initialize services on app start
   useEffect(() => {
+    // Initialize auth store FIRST (critical for app rendering)
+    initializeAuth();
+
     // Initialize OnDemand Chatbot if API key is available
     if (ONDEMAND_API_KEY && ONDEMAND_API_KEY !== 'YOUR_API_KEY_HERE') {
       try {
@@ -40,7 +46,7 @@ export default function App() {
       clearTimeout(timer);
       NotificationService.stopUsageTracking();
     };
-  }, []);
+  }, [initializeAuth]);
 
   // Skip TensorFlow pre-initialization - let LiveWorkoutScreen load it only when needed
   // This optimization saves ~15 seconds startup time when backend is available
