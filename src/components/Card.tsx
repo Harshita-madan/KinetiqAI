@@ -1,12 +1,19 @@
 import React from 'react';
-import { View, Text, StyleSheet, ViewStyle } from 'react-native';
+import { 
+  View, 
+  Text,              // ✅ add this
+  StyleSheet, 
+  ViewProps, 
+  StyleProp, 
+  ViewStyle 
+} from 'react-native';
 import { spacing, borderRadius, fontSize, fontWeight, useTheme } from '../theme';
 
-interface CardProps {
+interface CardProps extends ViewProps {
   children: React.ReactNode;
   title?: string;
   subtitle?: string;
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;  // ✅ allow single style, array, null, etc.
   variant?: 'default' | 'elevated' | 'outlined';
 }
 
@@ -16,6 +23,7 @@ export const Card: React.FC<CardProps> = ({
   subtitle,
   style,
   variant = 'default',
+  ...rest
 }) => {
   const { colors } = useTheme();
   
@@ -41,7 +49,15 @@ export const Card: React.FC<CardProps> = ({
   };
   
   return (
-    <View style={[styles.container, { backgroundColor: colors.surface }, variantStyles[variant], style]}>
+    <View
+      style={[
+        styles.container,
+        { backgroundColor: colors.surface },
+        variantStyles[variant],
+        style,
+      ]}
+      {...rest}
+    >
       {(title || subtitle) && (
         <View style={[styles.header, { borderBottomColor: colors.borderLight }]}>
           {title && <Text style={[styles.title, { color: colors.textPrimary }]}>{title}</Text>}

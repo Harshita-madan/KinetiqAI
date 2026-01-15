@@ -17,6 +17,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { spacing, borderRadius, fontSize, fontWeight, useTheme, ThemeColors } from '../theme';
 import { Avatar, Button } from '../components';
 import { NotificationService } from '../services';
+import { useAuthStore } from '../stores';
 
 const PROFILE_STORAGE_KEY = '@kinetiqai_profile';
 
@@ -75,13 +76,14 @@ const SettingSection: React.FC<SettingSectionProps> = ({ title, children, colors
 
 export const ProfileScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const { colors, isDarkMode, setDarkMode } = useTheme();
+  const { user, profile: authProfile, signOut } = useAuthStore();
   const [notifications, setNotifications] = useState(true);
   const [profileImage, setProfileImage] = useState<string | null>(null);
   const [profile, setProfile] = useState({
-    name: 'User',
-    email: 'user@example.com',
-    phone: '',
-    bio: '',
+    name: authProfile?.full_name || 'User',
+    email: authProfile?.email || user?.email || 'user@example.com',
+    phone: authProfile?.phone || '',
+    bio: authProfile?.bio || '',
   });
 
   // Load profile data and notification settings when screen comes into focus
@@ -167,9 +169,20 @@ export const ProfileScreen: React.FC<{ navigation: any }> = ({ navigation }) => 
 
   const loadProfile = async () => {
     try {
-      const savedProfile = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
-      if (savedProfile) {
-        setProfile(JSON.parse(savedProfile));
+      // Use auth profile data if available
+      if (authProfile) {
+        setProfile({
+          name: authProfile.full_name || 'User',
+          email: authProfile.email,
+          phone: authProfile.phone || '',
+          bio: authProfile.bio || '',
+        });
+      } else {
+        // Fallback to AsyncStorage for backward compatibility
+        const savedProfile = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
+        if (savedProfile) {
+          setProfile(JSON.parse(savedProfile));
+        }
       }
       const savedImage = await AsyncStorage.getItem('@kinetiqai_profile_image');
       if (savedImage) {
@@ -317,6 +330,30 @@ export const ProfileScreen: React.FC<{ navigation: any }> = ({ navigation }) => 
               'Privacy & Security',
               'Your data is protected with industry-standard encryption. We do not share your personal information with third parties. All workout data is stored securely on your device. You can delete your data at any time from the app settings.',
               [{ text: 'OK' }]
+            )}
+            colors={colors}
+          />
+          <SettingItem
+            icon="log-out-outline"
+            title="Sign Out"
+            subtitle="Logout from your account"
+            onPress={() => Alert.alert(
+              'Sign Out',
+              'Are you sure you want to sign out?',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { 
+                  text: 'Sign Out', 
+                  style: 'destructive',
+                  onPress: async () => {
+                    await signOut();
+                    navigation.reset({
+                      index: 0,
+                      routes: [{ name: 'SignIn' as never }],
+                    });
+                  }
+                }
+              ]
             )}
             colors={colors}
           />

@@ -107,11 +107,22 @@ class Keypoint(BaseModel):
     y: float
     score: float
     name: str
+    z: Optional[float] = None  # 3D depth coordinate
+
+
+class WorldKeypoint(BaseModel):
+    """3D world coordinates for accurate angle calculations"""
+    x: float  # in meters
+    y: float
+    z: float
+    visibility: float
+    name: str
 
 
 class Pose(BaseModel):
     keypoints: List[Keypoint]
     score: float
+    worldLandmarks: Optional[List[WorldKeypoint]] = None  # 3D coordinates
 
 
 class PostureAnalysis(BaseModel):
@@ -154,7 +165,7 @@ def decode_base64_image(base64_string: str) -> np.ndarray:
 
 
 def detect_pose(image: np.ndarray) -> Optional[Pose]:
-    """Detect pose using MediaPipe Tasks API."""
+    """Detect pose using MediaPipe Tasks API with 3D world landmarks."""
     # Ensure image is RGB
     if len(image.shape) == 3 and image.shape[2] == 3:
         # Check if BGR (from OpenCV) or RGB
@@ -171,11 +182,15 @@ def detect_pose(image: np.ndarray) -> Optional[Pose]:
     if not results.pose_landmarks or len(results.pose_landmarks) == 0:
         return None
     
-    # Get first pose
+    # Get first pose landmarks (screen coordinates)
     landmarks = results.pose_landmarks[0]
     
-    # Extract keypoints
+    # Get world landmarks (3D coordinates in meters) - more accurate for angles
+    world_landmarks = results.pose_world_landmarks[0] if results.pose_world_landmarks else None
+    
+    # Extract keypoints with 2D and 3D coordinates
     keypoints = []
+    world_keypoints = []
     
     for idx, name in SIMPLIFIED_KEYPOINTS.items():
         if idx < len(landmarks):
@@ -183,20 +198,46 @@ def detect_pose(image: np.ndarray) -> Optional[Pose]:
             keypoints.append(Keypoint(
                 x=landmark.x,  # Normalized 0-1
                 y=landmark.y,  # Normalized 0-1
+                z=landmark.z if hasattr(landmark, 'z') else None,  # Depth
                 score=landmark.visibility if hasattr(landmark, 'visibility') else 0.9,
                 name=name
             ))
+            
+            # Add world landmarks for 3D angle calculations
+            if world_landmarks and idx < len(world_landmarks):
+                world_lm = world_landmarks[idx]
+                world_keypoints.append(WorldKeypoint(
+                    x=world_lm.x,  # meters
+                    y=world_lm.y,
+                    z=world_lm.z,
+                    visibility=world_lm.visibility if hasattr(world_lm, 'visibility') else 0.9,
+                    name=name
+                ))
     
     # Calculate overall pose score
     avg_score = sum(kp.score for kp in keypoints) / len(keypoints) if keypoints else 0
     
-    return Pose(keypoints=keypoints, score=avg_score)
+    return Pose(
+        keypoints=keypoints, 
+        score=avg_score,
+        worldLandmarks=world_keypoints if world_keypoints else None
+    )
 
 
 def calculate_angle(p1: Keypoint, p2: Keypoint, p3: Keypoint) -> float:
-    """Calculate angle between three points."""
+    """Calculate angle between three points (2D)."""
     v1 = np.array([p1.x - p2.x, p1.y - p2.y])
     v2 = np.array([p3.x - p2.x, p3.y - p2.y])
+    
+    cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
+    angle = np.arccos(np.clip(cos_angle, -1, 1))
+    return np.degrees(angle)
+
+
+def calculate_3d_angle(p1: WorldKeypoint, p2: WorldKeypoint, p3: WorldKeypoint) -> float:
+    """Calculate 3D angle between three points (more accurate for medical use)."""
+    v1 = np.array([p1.x - p2.x, p1.y - p2.y, p1.z - p2.z])
+    v2 = np.array([p3.x - p2.x, p3.y - p2.y, p3.z - p2.z])
     
     cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
     angle = np.arccos(np.clip(cos_angle, -1, 1))
@@ -211,12 +252,90 @@ def get_keypoint(keypoints: List[Keypoint], name: str) -> Optional[Keypoint]:
     return None
 
 
-def analyze_squat(keypoints: List[Keypoint]) -> PostureAnalysis:
-    """Analyze squat form with enhanced bilateral criteria."""
+def get_world_keypoint(world_landmarks: List[WorldKeypoint], name: str) -> Optional[WorldKeypoint]:
+    """Get world landmark by name."""
+    for wl in world_landmarks:
+        if wl.name == name:
+            return wl
+    return None
+
+
+def get_scoring_coords(
+    keypoints: List[Keypoint],
+    visibility_threshold: float = 0.6,
+) -> Optional[dict]:
+    """Return face-centered, scale-normalized 2D coords for scoring.
+
+    Input keypoints are MediaPipe image-normalized (0..1).
+    Output coords are centered at the face anchor and divided by shoulder width
+    (hip width fallback). Units become "shoulder widths".
+
+    This mirrors the app-side rule: scoring MUST use normalized coords, not screen coords.
+    """
+
+    def vis(kp: Optional[Keypoint]) -> bool:
+        return kp is not None and (kp.score or 0.0) >= visibility_threshold
+
+    nose = get_keypoint(keypoints, 'nose')
+    left_eye = get_keypoint(keypoints, 'left_eye')
+    right_eye = get_keypoint(keypoints, 'right_eye')
+
+    # Preferred anchor: face center
+    center = None
+    if vis(nose) and vis(left_eye) and vis(right_eye):
+        center = {
+            'x': (nose.x + left_eye.x + right_eye.x) / 3.0,
+            'y': (nose.y + left_eye.y + right_eye.y) / 3.0,
+        }
+    else:
+        # Fallbacks: shoulders, then hips
+        ls = get_keypoint(keypoints, 'left_shoulder')
+        rs = get_keypoint(keypoints, 'right_shoulder')
+        if vis(ls) and vis(rs):
+            center = {'x': (ls.x + rs.x) / 2.0, 'y': (ls.y + rs.y) / 2.0}
+        else:
+            lh = get_keypoint(keypoints, 'left_hip')
+            rh = get_keypoint(keypoints, 'right_hip')
+            if vis(lh) and vis(rh):
+                center = {'x': (lh.x + rh.x) / 2.0, 'y': (lh.y + rh.y) / 2.0}
+
+    if center is None:
+        return None
+
+    # Scale factor: shoulder width preferred, hip width fallback
+    ls = get_keypoint(keypoints, 'left_shoulder')
+    rs = get_keypoint(keypoints, 'right_shoulder')
+    lh = get_keypoint(keypoints, 'left_hip')
+    rh = get_keypoint(keypoints, 'right_hip')
+
+    scale = None
+    if vis(ls) and vis(rs):
+        scale = np.linalg.norm(np.array([ls.x - rs.x, ls.y - rs.y]))
+    elif vis(lh) and vis(rh):
+        scale = np.linalg.norm(np.array([lh.x - rh.x, lh.y - rh.y]))
+
+    if scale is None or scale < 1e-3:
+        scale = 1.0
+
+    coords = {}
+    for kp in keypoints:
+        coords[kp.name] = {
+            'x': (kp.x - center['x']) / scale,
+            'y': (kp.y - center['y']) / scale,
+            'v': kp.score or 0.0,
+        }
+
+    coords['_meta'] = {'center': center, 'scale': float(scale)}
+    return coords
+
+
+def analyze_squat(keypoints: List[Keypoint], world_landmarks: Optional[List[WorldKeypoint]] = None) -> PostureAnalysis:
+    """Analyze squat form with enhanced bilateral criteria using 3D angles."""
     score = 100
     mistakes = []
     feedback = []
     
+    # Get 2D keypoints for display positions
     left_hip = get_keypoint(keypoints, 'left_hip')
     left_knee = get_keypoint(keypoints, 'left_knee')
     left_ankle = get_keypoint(keypoints, 'left_ankle')
@@ -225,65 +344,119 @@ def analyze_squat(keypoints: List[Keypoint]) -> PostureAnalysis:
     right_knee = get_keypoint(keypoints, 'right_knee')
     right_ankle = get_keypoint(keypoints, 'right_ankle')
     right_shoulder = get_keypoint(keypoints, 'right_shoulder')
+
+    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     
-    # Use bilateral averaging for more accurate assessment
-    if left_hip and left_knee and left_ankle and right_hip and right_knee and right_ankle:
-        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
-        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
-        knee_angle = (left_knee_angle + right_knee_angle) / 2  # Bilateral average
+    # Use 3D world landmarks for accurate angle calculation
+    use_3d = world_landmarks is not None and len(world_landmarks) >= 33
+    
+    if use_3d:
+        left_hip_3d = get_world_keypoint(world_landmarks, 'left_hip')
+        left_knee_3d = get_world_keypoint(world_landmarks, 'left_knee')
+        left_ankle_3d = get_world_keypoint(world_landmarks, 'left_ankle')
+        right_hip_3d = get_world_keypoint(world_landmarks, 'right_hip')
+        right_knee_3d = get_world_keypoint(world_landmarks, 'right_knee')
+        right_ankle_3d = get_world_keypoint(world_landmarks, 'right_ankle')
+        left_shoulder_3d = get_world_keypoint(world_landmarks, 'left_shoulder')
         
-        if knee_angle > 165:
-            feedback.append("Begin lowering into squat position")
-        elif knee_angle > 130:
-            mistakes.append("🟡 Squat deeper - thighs not parallel yet")
-            score -= 20
-        elif knee_angle > 100:
-            mistakes.append("🟡 Go slightly deeper for full range")
-            score -= 10
-        elif knee_angle >= 80 and knee_angle <= 100:
-            feedback.append("✅ Perfect squat depth!")
-        elif knee_angle >= 70 and knee_angle < 80:
-            mistakes.append("🟡 Slightly too deep - risk for knees")
-            score -= 8
-        else:
-            mistakes.append("🔴 Too deep - maintain control")
-            score -= 15
+        if all([left_hip_3d, left_knee_3d, left_ankle_3d, right_hip_3d, right_knee_3d, right_ankle_3d]):
+            # Calculate 3D angles (more accurate)
+            left_knee_angle = calculate_3d_angle(left_hip_3d, left_knee_3d, left_ankle_3d)
+            right_knee_angle = calculate_3d_angle(right_hip_3d, right_knee_3d, right_ankle_3d)
+            knee_angle = (left_knee_angle + right_knee_angle) / 2
+            
+            if knee_angle > 165:
+                feedback.append("Begin lowering into squat position")
+            elif knee_angle > 130:
+                mistakes.append("🟡 Squat deeper - thighs not parallel yet")
+                score -= 20
+            elif knee_angle > 100:
+                mistakes.append("🟡 Go slightly deeper for full range")
+                score -= 10
+            elif knee_angle >= 80 and knee_angle <= 100:
+                feedback.append("✅ Perfect squat depth!")
+            elif knee_angle >= 70 and knee_angle < 80:
+                mistakes.append("🟡 Slightly too deep - risk for knees")
+                score -= 8
+            else:
+                mistakes.append("🔴 Too deep - maintain control")
+                score -= 15
+            
+            # Check knee tracking (3D distance from ankle)
+            left_knee_forward = left_knee_3d.z - left_ankle_3d.z  # Positive = knee in front
+            if left_knee_forward > 0.08:  # 8cm forward
+                mistakes.append("🔴 Knees too far forward - sit back into hips")
+                score -= 25
+            elif left_knee_forward > 0.04:  # 4cm forward
+                mistakes.append("🟡 Watch knee position - keep over ankles")
+                score -= 12
+            
+            # Check torso angle
+            if left_shoulder_3d and left_hip_3d:
+                torso_lean = abs(left_shoulder_3d.x - left_hip_3d.x)
+                if torso_lean > 0.15:
+                    mistakes.append("🔴 Excessive forward lean - engage core")
+                    score -= 25
+                elif torso_lean > 0.10:
+                    mistakes.append("🟡 Reduce forward lean - chest up")
+                    score -= 15
+                elif torso_lean < 0.05:
+                    feedback.append("✅ Excellent upright torso!")
+    else:
+        # Fallback to 2D angles if 3D not available
+        if left_hip and left_knee and left_ankle and right_hip and right_knee and right_ankle:
+            left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+            right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
+            knee_angle = (left_knee_angle + right_knee_angle) / 2
+            
+            if knee_angle > 165:
+                feedback.append("Begin lowering into squat position")
+            elif knee_angle > 130:
+                mistakes.append("🟡 Squat deeper - thighs not parallel yet")
+                score -= 20
+            elif knee_angle > 100:
+                mistakes.append("🟡 Go slightly deeper for full range")
+                score -= 10
+            elif knee_angle >= 80 and knee_angle <= 100:
+                feedback.append("✅ Perfect squat depth!")
+            else:
+                mistakes.append("🟡 Watch depth control")
+                score -= 10
+            
+            # 2D knee tracking check
+            if left_knee.x < left_ankle.x - 0.08:
+                mistakes.append("🔴 Knees too far forward - sit back into hips")
+                score -= 25
+            elif left_knee.x < left_ankle.x - 0.03:
+                mistakes.append("🟡 Watch knee position - keep over ankles")
+                score -= 12
         
-        # Enhanced knee tracking (should not pass toes)
-        if left_knee.x < left_ankle.x - 0.08:
-            mistakes.append("🔴 Knees too far forward - sit back into hips")
-            score -= 25
-        elif left_knee.x < left_ankle.x - 0.03:
-            mistakes.append("🟡 Watch knee position - keep over ankles")
-            score -= 12
+        if left_shoulder and left_hip:
+            back_lean = abs(left_shoulder.x - left_hip.x)
+            if back_lean > 0.18:
+                mistakes.append("🔴 Excessive forward lean - engage core")
+                score -= 25
+            elif back_lean > 0.12:
+                mistakes.append("🟡 Reduce forward lean - chest up")
+                score -= 15
     
-    if left_shoulder and left_hip:
-        # Enhanced torso angle (should be relatively upright)
-        back_lean = abs(left_shoulder.x - left_hip.x)
-        if back_lean > 0.18:
-            mistakes.append("🔴 Excessive forward lean - engage core")
-            score -= 25
-        elif back_lean > 0.12:
-            mistakes.append("🟡 Reduce forward lean - chest up")
-            score -= 15
-        elif back_lean < 0.05:
-            feedback.append("✅ Excellent upright torso!")
+    # Check knee alignment (valgus/varus)
+    if scoring and 'left_knee' in scoring and 'right_knee' in scoring and 'left_hip' in scoring and 'right_hip' in scoring:
+        knee_width = abs(scoring['left_knee']['x'] - scoring['right_knee']['x'])
+        hip_width = abs(scoring['left_hip']['x'] - scoring['right_hip']['x'])
+        if hip_width > 1e-3:
+            ratio = knee_width / hip_width
+            if ratio < 0.65:
+                mistakes.append("🔴 Knee valgus - push knees outward")
+                score -= 25
+            elif ratio < 0.8:
+                mistakes.append("🟡 Knees slightly inward - maintain alignment")
+                score -= 12
     
-    if left_knee and right_knee and left_hip and right_hip:
-        # Enhanced knee alignment (knee valgus check)
-        knee_width = abs(left_knee.x - right_knee.x)
-        hip_width = abs(left_hip.x - right_hip.x)
-        if knee_width < hip_width * 0.65:
-            mistakes.append("🔴 Knee valgus - push knees outward")
-            score -= 25
-        elif knee_width < hip_width * 0.8:
-            mistakes.append("🟡 Knees slightly inward - maintain alignment")
-            score -= 12
-    
-    # Check foot stability (both feet should be flat)
-    if left_ankle and right_ankle:
-        foot_stability = abs(left_ankle.y - right_ankle.y)
-        if foot_stability > 0.05:
+    # Check foot stability
+    if scoring and 'left_ankle' in scoring and 'right_ankle' in scoring:
+        foot_stability = abs(scoring['left_ankle']['y'] - scoring['right_ankle']['y'])
+        if foot_stability > 0.18:
             mistakes.append("🟡 Uneven weight distribution - balance on both feet")
             score -= 10
     
@@ -316,6 +489,8 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
     right_hip = get_keypoint(keypoints, 'right_hip')
     right_ankle = get_keypoint(keypoints, 'right_ankle')
     
+    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
+
     if left_shoulder and left_hip and left_ankle:
         # Check body alignment (should be straight line)
         # Calculate deviation from straight line
@@ -334,15 +509,17 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
     if left_shoulder and left_elbow:
         # Check arm position
         shoulder_elbow_diff = abs(left_shoulder.x - left_elbow.x)
-        if shoulder_elbow_diff > 0.1:
+        if scoring and 'left_shoulder' in scoring and 'left_elbow' in scoring:
+            shoulder_elbow_diff = abs(scoring['left_shoulder']['x'] - scoring['left_elbow']['x'])
+        if shoulder_elbow_diff > 0.25:
             mistakes.append("🟡 Keep elbows directly under shoulders")
             score -= 15
     
     # Check bilateral symmetry
-    if left_shoulder and right_shoulder and left_hip and right_hip:
-        shoulder_diff = abs(left_shoulder.y - right_shoulder.y)
-        hip_diff = abs(left_hip.y - right_hip.y)
-        if shoulder_diff > 0.08 or hip_diff > 0.08:
+    if scoring and 'left_shoulder' in scoring and 'right_shoulder' in scoring and 'left_hip' in scoring and 'right_hip' in scoring:
+        shoulder_diff = abs(scoring['left_shoulder']['y'] - scoring['right_shoulder']['y'])
+        hip_diff = abs(scoring['left_hip']['y'] - scoring['right_hip']['y'])
+        if shoulder_diff > 0.12 or hip_diff > 0.14:
             mistakes.append("🟡 Keep body level - one side is higher")
             score -= 12
     
@@ -362,6 +539,7 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
+        scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     """Analyze lunge form with bilateral assessment."""
     score = 100
     mistakes = []
@@ -395,9 +573,10 @@ def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
         else:
             feedback.append("✅ Good front knee angle!")
     
-    if left_knee and left_ankle:
-        # Check knee over ankle
-        if left_knee.x < left_ankle.x - 0.08:
+    if scoring and 'left_knee' in scoring and 'left_ankle' in scoring:
+        # Check knee over ankle (scale-normalized)
+        knee_forward = scoring['left_knee']['x'] - scoring['left_ankle']['x']
+        if knee_forward > 0.35:
             mistakes.append("🔴 Front knee going past toes - keep it over ankle")
             score -= 20
     
@@ -424,6 +603,7 @@ def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_pushup(keypoints: List[Keypoint]) -> PostureAnalysis:
+        scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     """Analyze push-up form with bilateral assessment."""
     score = 100
     mistakes = []
@@ -483,6 +663,7 @@ def analyze_pushup(keypoints: List[Keypoint]) -> PostureAnalysis:
 
 
 def analyze_general(keypoints: List[Keypoint]) -> PostureAnalysis:
+        scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     """General posture analysis."""
     score = 85
     feedback = ["Pose detected successfully"]
@@ -491,9 +672,9 @@ def analyze_general(keypoints: List[Keypoint]) -> PostureAnalysis:
     left_shoulder = get_keypoint(keypoints, 'left_shoulder')
     right_shoulder = get_keypoint(keypoints, 'right_shoulder')
     
-    if left_shoulder and right_shoulder:
-        shoulder_diff = abs(left_shoulder.y - right_shoulder.y)
-        if shoulder_diff > 0.05:
+    if scoring and 'left_shoulder' in scoring and 'right_shoulder' in scoring:
+        shoulder_diff = abs(scoring['left_shoulder']['y'] - scoring['right_shoulder']['y'])
+        if shoulder_diff > 0.12:
             mistakes.append("🟡 Keep shoulders level")
             score -= 10
     
@@ -509,12 +690,12 @@ def analyze_general(keypoints: List[Keypoint]) -> PostureAnalysis:
     )
 
 
-def analyze_pose(keypoints: List[Keypoint], exercise: str) -> PostureAnalysis:
+def analyze_pose(keypoints: List[Keypoint], exercise: str, world_landmarks: Optional[List[WorldKeypoint]] = None) -> PostureAnalysis:
     """Analyze pose based on exercise type."""
     exercise_lower = exercise.lower()
     
     if 'squat' in exercise_lower:
-        return analyze_squat(keypoints)
+        return analyze_squat(keypoints, world_landmarks)
     elif 'plank' in exercise_lower:
         return analyze_plank(keypoints)
     elif 'lunge' in exercise_lower:
@@ -571,7 +752,7 @@ async def detect_pose_endpoint(request: DetectionRequest):
             )
         
         # Analyze pose
-        analysis = analyze_pose(pose.keypoints, request.exercise)
+        analysis = analyze_pose(pose.keypoints, request.exercise, pose.worldLandmarks)
         
         return DetectionResponse(
             success=True,

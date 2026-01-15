@@ -6,6 +6,8 @@ import {
   StyleSheet,
   ViewStyle,
   TextInputProps as RNTextInputProps,
+  StyleProp,
+  TextStyle,
 } from 'react-native';
 import { colors, spacing, borderRadius, fontSize, fontWeight } from '../theme';
 
@@ -30,6 +32,13 @@ export const TextInput: React.FC<TextInputProps> = ({
 }) => {
   const [isFocused, setIsFocused] = useState(false);
 
+  const inputStyle: StyleProp<TextStyle> = [
+    styles.input,
+    leftIcon ? styles.inputWithLeftIcon : undefined,
+    rightIcon ? styles.inputWithRightIcon : undefined,
+    style as StyleProp<TextStyle>,
+  ];
+
   return (
     <View style={[styles.container, containerStyle]}>
       {label && <Text style={styles.label}>{label}</Text>}
@@ -42,7 +51,7 @@ export const TextInput: React.FC<TextInputProps> = ({
       >
         {leftIcon && <View style={styles.iconLeft}>{leftIcon}</View>}
         <RNTextInput
-          style={[styles.input, leftIcon && styles.inputWithLeftIcon, rightIcon && styles.inputWithRightIcon, style]}
+          style={inputStyle}
           placeholderTextColor={colors.textMuted}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}

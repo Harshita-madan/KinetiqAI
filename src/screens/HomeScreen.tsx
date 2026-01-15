@@ -13,6 +13,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { spacing, borderRadius, fontSize, fontWeight, useTheme, ThemeColors } from '../theme';
 import StreakBadge from '../components/StreakBadge';
 import { Card, Avatar, Button } from '../components';
+import { useAuthStore } from '../stores';
 
 interface QuickActionProps {
   icon: keyof typeof Ionicons.glyphMap;
@@ -55,7 +56,9 @@ const FeatureCard: React.FC<FeatureCardProps> = ({ icon, title, description, col
 
 export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const { colors, isDarkMode } = useTheme();
-  const userName = 'User';
+  const { profile } = useAuthStore();
+  const userName = profile?.full_name || 'User';
+  const isPhysiotherapist = profile?.role === 'physiotherapist';
 
   // Streak state
   const [streakCount, setStreakCount] = React.useState<number>(0);
@@ -107,21 +110,25 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           style={styles.heroCard}
         >
           <View style={styles.heroContent}>
-            <Text style={styles.heroTitle}>AI Posture Coach</Text>
+            <Text style={styles.heroTitle}>
+              {isPhysiotherapist ? 'Patient Management' : 'AI Posture Coach'}
+            </Text>
             <Text style={styles.heroSubtitle}>
-              Perfect your form with real-time AI feedback and skeleton tracking
+              {isPhysiotherapist
+                ? 'Track patient progress and assign personalized exercise programs'
+                : 'Perfect your form with real-time AI feedback and skeleton tracking'}
             </Text>
             <Button
-              title="Start Training"
-              onPress={() => navigation.navigate('ExerciseSelection')}
+              title={isPhysiotherapist ? 'View Patients' : 'Start Training'}
+              onPress={() => navigation.navigate(isPhysiotherapist ? 'PhysioDashboard' : 'ExerciseSelection')}
               variant="secondary"
               size="md"
-              icon={<Ionicons name="fitness" size={18} color={colors.white} />}
+              icon={<Ionicons name={isPhysiotherapist ? 'people' : 'fitness'} size={18} color={colors.white} />}
               style={styles.heroButton}
             />
           </View>
           <View style={styles.heroIconContainer}>
-            <Ionicons name="body" size={80} color="rgba(255,255,255,0.3)" />
+            <Ionicons name={isPhysiotherapist ? 'medical' : 'body'} size={80} color="rgba(255,255,255,0.3)" />
           </View>
         </LinearGradient>
 
@@ -129,34 +136,69 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Quick Actions</Text>
           <View style={styles.quickActionsGrid}>
-            <QuickAction
-              icon="fitness"
-              title="Workout"
-              color={colors.primary}
-              onPress={() => navigation.navigate('ExerciseSelection')}
-              colors={colors}
-            />
-            <QuickAction
-              icon="chatbubble-ellipses"
-              title="AI Coach"
-              color={colors.secondary}
-              onPress={() => navigation.navigate('ChatbotCoach')}
-              colors={colors}
-            />
-            <QuickAction
-              icon="time"
-              title="History"
-              color={colors.accent}
-              onPress={() => navigation.navigate('History')}
-              colors={colors}
-            />
-            <QuickAction
-              icon="analytics"
-              title="Stats"
-              color={colors.info}
-              onPress={() => navigation.navigate('History')}
-              colors={colors}
-            />
+            {isPhysiotherapist ? (
+              <>
+                <QuickAction
+                  icon="people"
+                  title="My Patients"
+                  color={colors.primary}
+                  onPress={() => navigation.navigate('PhysioDashboard')}
+                  colors={colors}
+                />
+                <QuickAction
+                  icon="add-circle"
+                  title="Assign Program"
+                  color={colors.secondary}
+                  onPress={() => navigation.navigate('PhysioDashboard')}
+                  colors={colors}
+                />
+                <QuickAction
+                  icon="chatbubble-ellipses"
+                  title="Messages"
+                  color={colors.accent}
+                  onPress={() => navigation.navigate('Chat')}
+                  colors={colors}
+                />
+                <QuickAction
+                  icon="analytics"
+                  title="Analytics"
+                  color={colors.info}
+                  onPress={() => navigation.navigate('PhysioDashboard')}
+                  colors={colors}
+                />
+              </>
+            ) : (
+              <>
+                <QuickAction
+                  icon="fitness"
+                  title="Workout"
+                  color={colors.primary}
+                  onPress={() => navigation.navigate('ExerciseSelection')}
+                  colors={colors}
+                />
+                <QuickAction
+                  icon="list"
+                  title="Programs"
+                  color={colors.secondary}
+                  onPress={() => navigation.navigate('MyProgram')}
+                  colors={colors}
+                />
+                <QuickAction
+                  icon="search"
+                  title="Find Physio"
+                  color={colors.accent}
+                  onPress={() => navigation.navigate('FindPhysio')}
+                  colors={colors}
+                />
+                <QuickAction
+                  icon="time"
+                  title="History"
+                  color={colors.info}
+                  onPress={() => navigation.navigate('History')}
+                  colors={colors}
+                />
+              </>
+            )}
           </View>
         </View>
 
@@ -164,60 +206,101 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Features</Text>
           <View style={styles.featuresContainer}>
-            <FeatureCard
-              icon="camera"
-              title="Live Posture Check"
-              description="Real-time AI posture correction with skeleton overlay"
-              color={colors.primary}
-              onPress={() => navigation.navigate('ExerciseSelection')}
-              colors={colors}
-            />
-            <FeatureCard
-              icon="chatbubbles"
-              title="AI Coaching"
-              description="Get personalized fitness advice anytime"
-              color={colors.secondary}
-              onPress={() => navigation.navigate('ChatbotCoach')}
-              colors={colors}
-            />
-            <FeatureCard
-              icon="bar-chart"
-              title="Session History"
-              description="Track progress and view past workout sessions"
-              color={colors.accent}
-              onPress={() => navigation.navigate('History')}
-              colors={colors}
-            />
-            <FeatureCard
-              icon="shield-checkmark"
-              title="Privacy First"
-              description="No video storage - your data stays on device"
-              color={colors.info}
-              onPress={() => {}}
-              colors={colors}
-            />
+            {isPhysiotherapist ? (
+              <>
+                <FeatureCard
+                  icon="people"
+                  title="Patient Management"
+                  description="View and manage all your patients in one place"
+                  color={colors.primary}
+                  onPress={() => navigation.navigate('PhysioDashboard')}
+                  colors={colors}
+                />
+                <FeatureCard
+                  icon="clipboard"
+                  title="Program Assignment"
+                  description="Create personalized exercise programs for patients"
+                  color={colors.secondary}
+                  onPress={() => navigation.navigate('PhysioDashboard')}
+                  colors={colors}
+                />
+                <FeatureCard
+                  icon="analytics"
+                  title="Progress Tracking"
+                  description="Monitor patient performance and improvement"
+                  color={colors.accent}
+                  onPress={() => navigation.navigate('PhysioDashboard')}
+                  colors={colors}
+                />
+                <FeatureCard
+                  icon="chatbubbles"
+                  title="Patient Communication"
+                  description="Stay connected with your patients"
+                  color={colors.info}
+                  onPress={() => navigation.navigate('Chat')}
+                  colors={colors}
+                />
+              </>
+            ) : (
+              <>
+                <FeatureCard
+                  icon="camera"
+                  title="Live Posture Check"
+                  description="Real-time AI posture correction with skeleton overlay"
+                  color={colors.primary}
+                  onPress={() => navigation.navigate('ExerciseSelection')}
+                  colors={colors}
+                />
+                <FeatureCard
+                  icon="chatbubbles"
+                  title="AI Coaching"
+                  description="Get personalized fitness advice anytime"
+                  color={colors.secondary}
+                  onPress={() => navigation.navigate('ChatbotCoach')}
+                  colors={colors}
+                />
+                <FeatureCard
+                  icon="bar-chart"
+                  title="Session History"
+                  description="Track progress and view past workout sessions"
+                  color={colors.accent}
+                  onPress={() => navigation.navigate('History')}
+                  colors={colors}
+                />
+                <FeatureCard
+                  icon="shield-checkmark"
+                  title="Privacy First"
+                  description="No video storage - your data stays on device"
+                  color={colors.info}
+                  onPress={() => {}}
+                  colors={colors}
+                />
+              </>
+            )}
           </View>
         </View>
 
-        {/* Recent Activity */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Get Started</Text>
-          <Card variant="outlined">
-            <View style={styles.emptyState}>
-              <Ionicons name="barbell-outline" size={48} color={colors.primary} />
-              <Text style={[styles.emptyStateText, { color: colors.textPrimary }]}>Ready to improve your form?</Text>
-              <Text style={[styles.emptyStateSubtext, { color: colors.textSecondary }]}>
-                Start your first workout with AI-powered posture correction
-              </Text>
-              <TouchableOpacity 
-                style={[styles.startWorkoutButton, { backgroundColor: colors.primary }]}
-                onPress={() => navigation.navigate('ExerciseSelection')}
-              >
-                <Text style={styles.startWorkoutButtonText}>Start Workout</Text>
-              </TouchableOpacity>
-            </View>
-          </Card>
-        </View>
+        {/* Recent Activity / Get Started */}
+        {!isPhysiotherapist && (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Get Started</Text>
+            <Card variant="outlined">
+              <View style={styles.emptyState}>
+                <Ionicons name="barbell-outline" size={48} color={colors.primary} />
+                <Text style={[styles.emptyStateText, { color: colors.textPrimary }]}>Ready to improve your form?</Text>
+                <Text style={[styles.emptyStateSubtext, { color: colors.textSecondary }]}>
+                  Start your first workout with AI-powered posture correction
+                </Text>
+                <TouchableOpacity 
+                  style={[styles.startWorkoutButton, { backgroundColor: colors.primary }]}
+                  onPress={() => navigation.navigate('ExerciseSelection')}
+                >
+                  <Text style={styles.startWorkoutButtonText}>Start Workout</Text>
+                </TouchableOpacity>
+              </View>
+            </Card>
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );

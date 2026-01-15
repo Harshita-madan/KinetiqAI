@@ -2,6 +2,8 @@ export { poseDetectionService, PoseDetectionService } from './PoseDetectionServi
 export { storageService, StorageService } from './StorageService';
 export { poseAPIService } from './PoseAPIService';
 export { NotificationService } from './NotificationService';
+export { poseTrackerService } from './PoseTrackerService';
 export type { Pose, Keypoint, PostureAnalysis } from './PoseDetectionService';
 export type { SessionData } from './StorageService';
 export type { ChatMessage } from './OnDemandChatbotService';
+export type { PoseTrackerMessage, ExerciseReps, PoseTrackerConfig } from './PoseTrackerService';

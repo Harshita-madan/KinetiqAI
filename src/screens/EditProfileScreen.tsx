@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { spacing, borderRadius, fontSize, fontWeight, useTheme } from '../theme';
 import { Avatar, Button } from '../components';
+import { useAuthStore } from '../stores';
 
 const PROFILE_STORAGE_KEY = '@kinetiqai_profile';
 
@@ -28,13 +29,14 @@ interface ProfileData {
 
 export const EditProfileScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const { colors } = useTheme();
+  const { profile: authProfile, updateProfile } = useAuthStore();
   const [isLoading, setIsLoading] = useState(false);
   const [profileImage, setProfileImage] = useState<string | null>(null);
   const [profile, setProfile] = useState<ProfileData>({
-    name: 'User',
-    email: 'user@example.com',
-    phone: '',
-    bio: '',
+    name: authProfile?.full_name || 'User',
+    email: authProfile?.email || 'user@example.com',
+    phone: authProfile?.phone || '',
+    bio: authProfile?.bio || '',
   });
 
   // Load profile on mount
@@ -44,9 +46,20 @@ export const EditProfileScreen: React.FC<{ navigation: any }> = ({ navigation })
 
   const loadProfile = async () => {
     try {
-      const savedProfile = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
-      if (savedProfile) {
-        setProfile(JSON.parse(savedProfile));
+      // Prioritize auth profile from Supabase
+      if (authProfile) {
+        setProfile({
+          name: authProfile.full_name || 'User',
+          email: authProfile.email || 'user@example.com',
+          phone: authProfile.phone || '',
+          bio: authProfile.bio || '',
+        });
+      } else {
+        // Fallback to AsyncStorage for backward compatibility
+        const savedProfile = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
+        if (savedProfile) {
+          setProfile(JSON.parse(savedProfile));
+        }
       }
       const savedImage = await AsyncStorage.getItem('@kinetiqai_profile_image');
       if (savedImage) {
@@ -143,12 +156,24 @@ export const EditProfileScreen: React.FC<{ navigation: any }> = ({ navigation })
 
     setIsLoading(true);
     try {
+      // Update Supabase profile if auth is available
+      if (authProfile) {
+        await updateProfile({
+          full_name: profile.name,
+          phone: profile.phone,
+          bio: profile.bio,
+        });
+      }
+      
+      // Also save to AsyncStorage for backward compatibility
       await AsyncStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
+      
       Alert.alert('Success', 'Profile updated successfully', [
         { text: 'OK', onPress: () => navigation.goBack() }
       ]);
     } catch (error) {
-      Alert.alert('Error', 'Failed to save profile');
+      console.error('Error saving profile:', error);
+      Alert.alert('Error', 'Failed to save profile. Please try again.');
     } finally {
       setIsLoading(false);
     }

@@ -179,6 +179,8 @@ export class PoseDetectionService {
 
     try {
       let inputTensor: tf.Tensor3D | null = null;
+      let inputWidth = 0;
+      let inputHeight = 0;
       
       if (Platform.OS !== 'web') {
         // React Native: Convert base64 image to tensor
@@ -251,6 +253,8 @@ export class PoseDetectionService {
             
             console.log('Creating tensor...');
             inputTensor = tf.tensor3d(Array.from(rgbData), [height, width, 3], 'int32');
+            inputWidth = width;
+            inputHeight = height;
             console.log('Tensor created successfully');
             
           } catch (decodeError) {
@@ -273,10 +277,16 @@ export class PoseDetectionService {
             img.onerror = reject;
           });
           inputTensor = tf.browser.fromPixels(img);
+          inputHeight = inputTensor.shape[0];
+          inputWidth = inputTensor.shape[1];
         } else if (imageData instanceof HTMLImageElement || imageData instanceof HTMLVideoElement) {
           inputTensor = tf.browser.fromPixels(imageData);
+          inputHeight = inputTensor.shape[0];
+          inputWidth = inputTensor.shape[1];
         } else if (imageData instanceof tf.Tensor) {
           inputTensor = imageData as tf.Tensor3D;
+          inputHeight = inputTensor.shape[0];
+          inputWidth = inputTensor.shape[1];
         }
       }
       
@@ -305,8 +315,23 @@ export class PoseDetectionService {
       if (inputTensor && inputTensor.dispose) {
         inputTensor.dispose();
       }
-      
-      return poses || [];
+
+      // Normalize output coordinates to 0..1 (image-normalized), regardless of input tensor size.
+      // This prevents downstream overlay drift when the input gets resized for performance.
+      if (!poses || poses.length === 0) return [];
+      const safeW = inputWidth || 1;
+      const safeH = inputHeight || 1;
+
+      const normalizedPoses: Pose[] = (poses as any).map((p: any) => ({
+        ...p,
+        keypoints: (p.keypoints || []).map((kp: any) => ({
+          ...kp,
+          x: typeof kp.x === 'number' ? kp.x / safeW : kp.x,
+          y: typeof kp.y === 'number' ? kp.y / safeH : kp.y,
+        })),
+      }));
+
+      return normalizedPoses;
     } catch (error) {
       console.error('Pose detection error:', error);
       return [];

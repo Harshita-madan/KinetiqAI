@@ -134,9 +134,18 @@ export const ChatScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         error instanceof Error ? error.message : 'Failed to get response from chatbot';
       console.error('Chat Error:', errorMessage);
 
+      let errorText = "I'm experiencing a technical issue. Please try again in a moment.";
+      
+      // Check if it's an initialization error
+      if (errorMessage.includes('not initialized')) {
+        errorText = "The chat service is not properly configured. Please restart the app and ensure your API key is set.";
+      } else if (errorMessage.includes('API Error') || errorMessage.includes('Failed to create')) {
+        errorText = "Unable to connect to the chat service. Please check your connection and try again.";
+      }
+
       const errorResponse: Message = {
         id: (Date.now() + 1).toString(),
-        text: "I'm experiencing a technical issue. Please try again in a moment.",
+        text: errorText,
         isUser: false,
         timestamp: new Date(),
       };
