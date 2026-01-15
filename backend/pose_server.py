@@ -260,6 +260,75 @@ def get_world_keypoint(world_landmarks: List[WorldKeypoint], name: str) -> Optio
     return None
 
 
+def get_scoring_coords(
+    keypoints: List[Keypoint],
+    visibility_threshold: float = 0.6,
+) -> Optional[dict]:
+    """Return face-centered, scale-normalized 2D coords for scoring.
+
+    Input keypoints are MediaPipe image-normalized (0..1).
+    Output coords are centered at the face anchor and divided by shoulder width
+    (hip width fallback). Units become "shoulder widths".
+
+    This mirrors the app-side rule: scoring MUST use normalized coords, not screen coords.
+    """
+
+    def vis(kp: Optional[Keypoint]) -> bool:
+        return kp is not None and (kp.score or 0.0) >= visibility_threshold
+
+    nose = get_keypoint(keypoints, 'nose')
+    left_eye = get_keypoint(keypoints, 'left_eye')
+    right_eye = get_keypoint(keypoints, 'right_eye')
+
+    # Preferred anchor: face center
+    center = None
+    if vis(nose) and vis(left_eye) and vis(right_eye):
+        center = {
+            'x': (nose.x + left_eye.x + right_eye.x) / 3.0,
+            'y': (nose.y + left_eye.y + right_eye.y) / 3.0,
+        }
+    else:
+        # Fallbacks: shoulders, then hips
+        ls = get_keypoint(keypoints, 'left_shoulder')
+        rs = get_keypoint(keypoints, 'right_shoulder')
+        if vis(ls) and vis(rs):
+            center = {'x': (ls.x + rs.x) / 2.0, 'y': (ls.y + rs.y) / 2.0}
+        else:
+            lh = get_keypoint(keypoints, 'left_hip')
+            rh = get_keypoint(keypoints, 'right_hip')
+            if vis(lh) and vis(rh):
+                center = {'x': (lh.x + rh.x) / 2.0, 'y': (lh.y + rh.y) / 2.0}
+
+    if center is None:
+        return None
+
+    # Scale factor: shoulder width preferred, hip width fallback
+    ls = get_keypoint(keypoints, 'left_shoulder')
+    rs = get_keypoint(keypoints, 'right_shoulder')
+    lh = get_keypoint(keypoints, 'left_hip')
+    rh = get_keypoint(keypoints, 'right_hip')
+
+    scale = None
+    if vis(ls) and vis(rs):
+        scale = np.linalg.norm(np.array([ls.x - rs.x, ls.y - rs.y]))
+    elif vis(lh) and vis(rh):
+        scale = np.linalg.norm(np.array([lh.x - rh.x, lh.y - rh.y]))
+
+    if scale is None or scale < 1e-3:
+        scale = 1.0
+
+    coords = {}
+    for kp in keypoints:
+        coords[kp.name] = {
+            'x': (kp.x - center['x']) / scale,
+            'y': (kp.y - center['y']) / scale,
+            'v': kp.score or 0.0,
+        }
+
+    coords['_meta'] = {'center': center, 'scale': float(scale)}
+    return coords
+
+
 def analyze_squat(keypoints: List[Keypoint], world_landmarks: Optional[List[WorldKeypoint]] = None) -> PostureAnalysis:
     """Analyze squat form with enhanced bilateral criteria using 3D angles."""
     score = 100
@@ -275,6 +344,8 @@ def analyze_squat(keypoints: List[Keypoint], world_landmarks: Optional[List[Worl
     right_knee = get_keypoint(keypoints, 'right_knee')
     right_ankle = get_keypoint(keypoints, 'right_ankle')
     right_shoulder = get_keypoint(keypoints, 'right_shoulder')
+
+    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     
     # Use 3D world landmarks for accurate angle calculation
     use_3d = world_landmarks is not None and len(world_landmarks) >= 33
@@ -370,20 +441,22 @@ def analyze_squat(keypoints: List[Keypoint], world_landmarks: Optional[List[Worl
                 score -= 15
     
     # Check knee alignment (valgus/varus)
-    if left_knee and right_knee and left_hip and right_hip:
-        knee_width = abs(left_knee.x - right_knee.x)
-        hip_width = abs(left_hip.x - right_hip.x)
-        if knee_width < hip_width * 0.65:
-            mistakes.append("🔴 Knee valgus - push knees outward")
-            score -= 25
-        elif knee_width < hip_width * 0.8:
-            mistakes.append("🟡 Knees slightly inward - maintain alignment")
-            score -= 12
+    if scoring and 'left_knee' in scoring and 'right_knee' in scoring and 'left_hip' in scoring and 'right_hip' in scoring:
+        knee_width = abs(scoring['left_knee']['x'] - scoring['right_knee']['x'])
+        hip_width = abs(scoring['left_hip']['x'] - scoring['right_hip']['x'])
+        if hip_width > 1e-3:
+            ratio = knee_width / hip_width
+            if ratio < 0.65:
+                mistakes.append("🔴 Knee valgus - push knees outward")
+                score -= 25
+            elif ratio < 0.8:
+                mistakes.append("🟡 Knees slightly inward - maintain alignment")
+                score -= 12
     
     # Check foot stability
-    if left_ankle and right_ankle:
-        foot_stability = abs(left_ankle.y - right_ankle.y)
-        if foot_stability > 0.05:
+    if scoring and 'left_ankle' in scoring and 'right_ankle' in scoring:
+        foot_stability = abs(scoring['left_ankle']['y'] - scoring['right_ankle']['y'])
+        if foot_stability > 0.18:
             mistakes.append("🟡 Uneven weight distribution - balance on both feet")
             score -= 10
     
@@ -416,6 +489,8 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
     right_hip = get_keypoint(keypoints, 'right_hip')
     right_ankle = get_keypoint(keypoints, 'right_ankle')
     
+    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
+
     if left_shoulder and left_hip and left_ankle:
         # Check body alignment (should be straight line)
         # Calculate deviation from straight line
@@ -434,15 +509,17 @@ def analyze_plank(keypoints: List[Keypoint]) -> PostureAnalysis:
     if left_shoulder and left_elbow:
         # Check arm position
         shoulder_elbow_diff = abs(left_shoulder.x - left_elbow.x)
-        if shoulder_elbow_diff > 0.1:
+        if scoring and 'left_shoulder' in scoring and 'left_elbow' in scoring:
+            shoulder_elbow_diff = abs(scoring['left_shoulder']['x'] - scoring['left_elbow']['x'])
+        if shoulder_elbow_diff > 0.25:
             mistakes.append("🟡 Keep elbows directly under shoulders")
             score -= 15
     
     # Check bilateral symmetry
-    if left_shoulder and right_shoulder and left_hip and right_hip:
-        shoulder_diff = abs(left_shoulder.y - right_shoulder.y)
-        hip_diff = abs(left_hip.y - right_hip.y)
-        if shoulder_diff > 0.08 or hip_diff > 0.08:
+    if scoring and 'left_shoulder' in scoring and 'right_shoulder' in scoring and 'left_hip' in scoring and 'right_hip' in scoring:
+        shoulder_diff = abs(scoring['left_shoulder']['y'] - scoring['right_shoulder']['y'])
+        hip_diff = abs(scoring['left_hip']['y'] - scoring['right_hip']['y'])
+        if shoulder_diff > 0.12 or hip_diff > 0.14:
             mistakes.append("🟡 Keep body level - one side is higher")
             score -= 12
     
@@ -466,6 +543,8 @@ def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
     score = 100
     mistakes = []
     feedback = []
+    
+    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     
     left_hip = get_keypoint(keypoints, 'left_hip')
     left_knee = get_keypoint(keypoints, 'left_knee')
@@ -495,9 +574,10 @@ def analyze_lunge(keypoints: List[Keypoint]) -> PostureAnalysis:
         else:
             feedback.append("✅ Good front knee angle!")
     
-    if left_knee and left_ankle:
-        # Check knee over ankle
-        if left_knee.x < left_ankle.x - 0.08:
+    if scoring and 'left_knee' in scoring and 'left_ankle' in scoring:
+        # Check knee over ankle (scale-normalized)
+        knee_forward = scoring['left_knee']['x'] - scoring['left_ankle']['x']
+        if knee_forward > 0.35:
             mistakes.append("🔴 Front knee going past toes - keep it over ankle")
             score -= 20
     
@@ -528,6 +608,8 @@ def analyze_pushup(keypoints: List[Keypoint]) -> PostureAnalysis:
     score = 100
     mistakes = []
     feedback = []
+    
+    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
     
     left_shoulder = get_keypoint(keypoints, 'left_shoulder')
     left_elbow = get_keypoint(keypoints, 'left_elbow')
@@ -588,12 +670,14 @@ def analyze_general(keypoints: List[Keypoint]) -> PostureAnalysis:
     feedback = ["Pose detected successfully"]
     mistakes = []
     
+    scoring = get_scoring_coords(keypoints, visibility_threshold=0.6)
+    
     left_shoulder = get_keypoint(keypoints, 'left_shoulder')
     right_shoulder = get_keypoint(keypoints, 'right_shoulder')
     
-    if left_shoulder and right_shoulder:
-        shoulder_diff = abs(left_shoulder.y - right_shoulder.y)
-        if shoulder_diff > 0.05:
+    if scoring and 'left_shoulder' in scoring and 'right_shoulder' in scoring:
+        shoulder_diff = abs(scoring['left_shoulder']['y'] - scoring['right_shoulder']['y'])
+        if shoulder_diff > 0.12:
             mistakes.append("🟡 Keep shoulders level")
             score -= 10
     

@@ -1,9 +1,11 @@
 import React from 'react';
+import { View, ActivityIndicator } from 'react-native';
 import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../theme';
+import { useAuthStore } from '../stores';
 import {
   HomeScreen,
   ChatScreen,
@@ -14,9 +16,23 @@ import {
   SessionSummaryScreen,
   HistoryScreen,
   ChatbotCoachScreen,
+  SignInScreen,
+  RoleSelectionScreen,
+  ProfileSetupScreen,
+  FindPhysioScreen,
+  MyProgramScreen,
+  PhysioDashboardScreen,
+  PatientDetailScreen,
+  AssignProgramScreen,
 } from '../screens';
 
 export type RootStackParamList = {
+  // Auth Stack
+  SignIn: undefined;
+  RoleSelection: { email: string; password: string };
+  ProfileSetup: undefined;
+  
+  // Main Stack
   MainTabs: undefined;
   ExerciseSelection: undefined;
   LiveWorkout: { exercise: string; duration: number };
@@ -24,6 +40,15 @@ export type RootStackParamList = {
   History: undefined;
   ChatbotCoach: { session?: any };
   EditProfile: undefined;
+  
+  // Patient Screens
+  FindPhysio: undefined;
+  MyProgram: undefined;
+  
+  // Physiotherapist Screens
+  PhysioDashboard: undefined;
+  PatientDetail: { patientId: string };
+  AssignProgram: { patientId: string };
 };
 
 export type MainTabParamList = {
@@ -84,6 +109,7 @@ const MainTabs = () => {
 
 export const AppNavigator: React.FC = () => {
   const { colors, isDarkMode } = useTheme();
+  const { user, profile, initialized } = useAuthStore();
   
   const customTheme = {
     ...(isDarkMode ? DarkTheme : DefaultTheme),
@@ -97,6 +123,18 @@ export const AppNavigator: React.FC = () => {
       notification: colors.primary,
     },
   };
+
+  // Show loading screen while initializing auth
+  if (!initialized) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  // Determine if user is fully authenticated (has completed profile)
+  const isAuthenticated = user && profile && profile.full_name;
   
   return (
     <NavigationContainer theme={customTheme}>
@@ -105,13 +143,34 @@ export const AppNavigator: React.FC = () => {
           headerShown: false,
         }}
       >
-        <Stack.Screen name="MainTabs" component={MainTabs} />
-        <Stack.Screen name="ExerciseSelection" component={ExerciseSelectionScreen} />
-        <Stack.Screen name="LiveWorkout" component={LiveWorkoutScreen} />
-        <Stack.Screen name="SessionSummary" component={SessionSummaryScreen} />
-        <Stack.Screen name="History" component={HistoryScreen} />
-        <Stack.Screen name="ChatbotCoach" component={ChatbotCoachScreen} />
-        <Stack.Screen name="EditProfile" component={EditProfileScreen} />
+        {!isAuthenticated ? (
+          // Auth Stack - shown when not authenticated
+          <>
+            <Stack.Screen name="SignIn" component={SignInScreen} />
+            <Stack.Screen name="RoleSelection" component={RoleSelectionScreen} />
+            <Stack.Screen name="ProfileSetup" component={ProfileSetupScreen} />
+          </>
+        ) : (
+          // Main Stack - shown when authenticated
+          <>
+            <Stack.Screen name="MainTabs" component={MainTabs} />
+            <Stack.Screen name="ExerciseSelection" component={ExerciseSelectionScreen} />
+            <Stack.Screen name="LiveWorkout" component={LiveWorkoutScreen} />
+            <Stack.Screen name="SessionSummary" component={SessionSummaryScreen} />
+            <Stack.Screen name="History" component={HistoryScreen} />
+            <Stack.Screen name="ChatbotCoach" component={ChatbotCoachScreen} />
+            <Stack.Screen name="EditProfile" component={EditProfileScreen} />
+            
+            {/* Patient Screens */}
+            <Stack.Screen name="FindPhysio" component={FindPhysioScreen} />
+            <Stack.Screen name="MyProgram" component={MyProgramScreen} />
+            
+            {/* Physiotherapist Screens */}
+            <Stack.Screen name="PhysioDashboard" component={PhysioDashboardScreen} />
+            <Stack.Screen name="PatientDetail" component={PatientDetailScreen} />
+            <Stack.Screen name="AssignProgram" component={AssignProgramScreen} />
+          </>
+        )}
       </Stack.Navigator>
     </NavigationContainer>
   );
