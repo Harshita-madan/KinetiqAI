@@ -10,7 +10,6 @@ import {
   Platform,
   Switch,
 } from 'react-native';
-import * as Haptics from 'expo-haptics';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
@@ -49,8 +48,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   const [isInitializing, setIsInitializing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
-  const [repCount, setRepCount] = useState(0);
-  const [repStage, setRepStage] = useState<'up' | 'down' | null>(null);
+
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(voiceManager.isEnabled());
 
   // Single source-of-truth feedback state (shared between UI and TTS)
@@ -61,13 +59,8 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   const poseHistoryRef = useRef<Pose[]>([]);
   const SMOOTHING_WINDOW = 3; // Average last 3 poses for smoother skeleton
   
-  // Rep counting hysteresis (prevent false counts)
-  const lastRepAngleRef = useRef<number>(0);
-  const repTransitionThresholdRef = useRef<number>(20); // Minimum angle change for rep
-  
-  // Velocity tracking for tempo analysis
-  const velocityHistoryRef = useRef<number[]>([]);
-  const lastAngleRef = useRef<number>(0);
+  // (Rep-counting removed) -- rep hysteresis and velocity tracking not used anymore
+
 
   const cameraRef = useRef<CameraView>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -558,8 +551,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
 
     setCurrentPose(smoothedPose);
 
-    // Count reps based on exercise type
-    countReps(scaledPose);
+    // Rep counting removed (presentation-only change) -- rep logic no longer tracked here.
 
     // Analyze posture with basic form analysis
     const analysis = poseDetectionService.analyzePosture(scaledPose, exercise);
@@ -607,149 +599,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
     }
   };
 
-  // Rep counting logic with hysteresis (prevents false counts from minor movements)
-  const countReps = (pose: Pose) => {
-    if (!isActive) return;
 
-    const exerciseLower = exercise.toLowerCase();
-    
-    // Get keypoints (bilateral for better accuracy)
-    const leftShoulder = pose.keypoints.find(kp => kp.name === 'left_shoulder');
-    const leftElbow = pose.keypoints.find(kp => kp.name === 'left_elbow');
-    const leftWrist = pose.keypoints.find(kp => kp.name === 'left_wrist');
-    const leftHip = pose.keypoints.find(kp => kp.name === 'left_hip');
-    const leftKnee = pose.keypoints.find(kp => kp.name === 'left_knee');
-    const leftAnkle = pose.keypoints.find(kp => kp.name === 'left_ankle');
-    
-    const rightShoulder = pose.keypoints.find(kp => kp.name === 'right_shoulder');
-    const rightElbow = pose.keypoints.find(kp => kp.name === 'right_elbow');
-    const rightWrist = pose.keypoints.find(kp => kp.name === 'right_wrist');
-    const rightHip = pose.keypoints.find(kp => kp.name === 'right_hip');
-    const rightKnee = pose.keypoints.find(kp => kp.name === 'right_knee');
-    const rightAnkle = pose.keypoints.find(kp => kp.name === 'right_ankle');
-
-    if (exerciseLower.includes('curl') || exerciseLower.includes('bicep')) {
-      // Bicep curl counting with bilateral tracking and velocity analysis
-      if (leftShoulder && leftElbow && leftWrist && rightShoulder && rightElbow && rightWrist) {
-        const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
-        const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
-        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
-        
-        // Velocity tracking
-        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = avgAngle;
-        
-        // Extended position (arm straight)
-        if (avgAngle > 160 && repStage !== 'down') {
-          setRepStage('down');
-          lastRepAngleRef.current = avgAngle;
-        }
-        // Contracted position (arm bent) - requires significant angle change
-        if (avgAngle < 40 && repStage === 'down' && (lastRepAngleRef.current - avgAngle) > 120) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 20) { // Not rushing
-            setRepStage('up');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = avgAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    } else if (exerciseLower.includes('squat')) {
-      // Squat counting with bilateral tracking and velocity analysis
-      if (leftHip && leftKnee && leftAnkle && rightHip && rightKnee && rightAnkle) {
-        const leftAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
-        const rightAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
-        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
-        
-        // Velocity tracking
-        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = avgAngle;
-        
-        // Standing position
-        if (avgAngle > 160 && repStage !== 'up') {
-          setRepStage('up');
-          lastRepAngleRef.current = avgAngle;
-        }
-        // Squat position - requires going below 100° from standing
-        if (avgAngle < 100 && repStage === 'up' && (lastRepAngleRef.current - avgAngle) > 60) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 15) { // Not rushing
-            setRepStage('down');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = avgAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    } else if (exerciseLower.includes('push')) {
-      // Push-up counting with bilateral tracking and velocity analysis
-      if (leftShoulder && leftElbow && leftWrist && rightShoulder && rightElbow && rightWrist) {
-        const leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
-        const rightAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
-        const avgAngle = (leftAngle + rightAngle) / 2; // Bilateral average
-        
-        // Velocity tracking
-        const angleChange = Math.abs(avgAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = avgAngle;
-        
-        // Extended position (plank)
-        if (avgAngle > 160 && repStage !== 'up') {
-          setRepStage('up');
-          lastRepAngleRef.current = avgAngle;
-        }
-        // Lowered position - requires going below 90° from plank
-        if (avgAngle < 90 && repStage === 'up' && (lastRepAngleRef.current - avgAngle) > 70) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 15) { // Not rushing
-            setRepStage('down');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = avgAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    } else if (exerciseLower.includes('lunge')) {
-      // Lunge counting with bilateral tracking
-      if (leftHip && leftKnee && leftAnkle && rightHip && rightKnee && rightAnkle) {
-        const leftAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
-        const rightAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
-        const frontAngle = Math.min(leftAngle, rightAngle); // Front leg (more bent)
-        
-        // Velocity tracking
-        const angleChange = Math.abs(frontAngle - lastAngleRef.current);
-        velocityHistoryRef.current.push(angleChange);
-        if (velocityHistoryRef.current.length > 5) velocityHistoryRef.current.shift();
-        lastAngleRef.current = frontAngle;
-        
-        // Standing position
-        if (frontAngle > 150 && repStage !== 'up') {
-          setRepStage('up');
-          lastRepAngleRef.current = frontAngle;
-        }
-        // Lunge position - requires going below 90° from standing
-        if (frontAngle < 90 && repStage === 'up' && (lastRepAngleRef.current - frontAngle) > 60) {
-          // Check tempo isn't too fast
-          const avgVelocity = velocityHistoryRef.current.reduce((a, b) => a + b, 0) / velocityHistoryRef.current.length;
-          if (avgVelocity < 15) { // Not rushing
-            setRepStage('down');
-            setRepCount(prev => prev + 1);
-            lastRepAngleRef.current = frontAngle;
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          }
-        }
-      }
-    }
-  };
 
   const handleStartStop = async () => {
     if (isActive) {
@@ -768,8 +618,6 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       setIsActive(true);
       setTimeElapsed(0);
       setScores([]);
-      setRepCount(0);
-      setRepStage(null);
     }
   };
 
@@ -786,7 +634,6 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
       date: new Date().toISOString(),
       duration: timeElapsed,
       averageScore: Math.round(averageScore),
-      reps: repCount, // Include rep count in session data
       mistakes: postureAnalysis?.mistakes || [],
       feedback: [...(postureAnalysis?.feedback || []), ...(postureAnalysis?.personalizedInsights || [])],
       timestamp: Date.now(),
@@ -1093,51 +940,41 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           >
             <Text style={styles.scoreText}>{Math.round(postureAnalysis.score)}</Text>
             <Text style={styles.scoreLabel}>Score</Text>
+
+
           </View>
         )}
 
-        {/* Rep Counter Box (like MediaPipe tutorial) */}
-        {isActive && (
-          <View style={styles.repCounterBox}>
-            <View style={styles.repCounterSection}>
-              <Text style={styles.repCounterLabel}>REPS</Text>
-              <Text style={styles.repCounterValue}>{repCount}</Text>
-            </View>
-            <View style={[styles.repCounterSection, { marginLeft: 20 }]}>
-              <Text style={styles.repCounterLabel}>STAGE</Text>
-              <Text style={styles.repCounterValue}>{repStage || '-'}</Text>
-            </View>
-          </View>
-        )}
+        {/* Rep counter removed — UI and rep-counting logic have been removed to keep only score display */} 
 
-        {/* Detection Mode Indicator */}
+        {/* Detection Mode Indicator + Voice toggle (moved below Real-Time AI) */}
         {isActive && (
           <View style={styles.modeIndicator}>
-            <Ionicons 
-              name={detectionMode === 'api' ? 'cloud' : detectionMode === 'local' ? 'hardware-chip' : 'videocam'} 
-              size={14} 
-              color={detectionMode === 'api' ? '#56E8A0' : detectionMode === 'local' ? '#7556E8' : '#E8C956'} 
-            />
-            <Text style={[
-              styles.modeText,
-              { color: detectionMode === 'api' ? '#56E8A0' : detectionMode === 'local' ? '#7556E8' : '#E8C956' }
-            ]}>
-              {detectionMode === 'api' ? 'Real-Time AI' : detectionMode === 'local' ? 'Local ML' : 'Demo Mode'}
-            </Text>
-          </View>
-        )}
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Ionicons 
+                name={detectionMode === 'api' ? 'cloud' : detectionMode === 'local' ? 'hardware-chip' : 'videocam'} 
+                size={14} 
+                color={detectionMode === 'api' ? '#56E8A0' : detectionMode === 'local' ? '#7556E8' : '#E8C956'} 
+              />
+              <Text style={[
+                styles.modeText,
+                { color: detectionMode === 'api' ? '#56E8A0' : detectionMode === 'local' ? '#7556E8' : '#E8C956' }
+              ]}>
+                {detectionMode === 'api' ? 'Real-Time AI' : detectionMode === 'local' ? 'Local ML' : 'Demo Mode'}
+              </Text>
+            </View>
 
-        {/* Voice toggle */}
-        {isActive && (
-          <View style={styles.voiceToggleBox}>
-            <Text style={{ marginRight: 8, color: colors.white }}>Voice</Text>
-            <Switch
-              value={voiceEnabled}
-              onValueChange={(val) => {
-                setVoiceEnabled(val);
-                voiceManager.setEnabled(val);
-              }}
-            />
+            {/* Inline voice toggle positioned under the detection label */}
+            <View style={styles.voiceToggleInline}>
+              <Text style={styles.voiceToggleLabel}>Voice</Text>
+              <Switch
+                value={voiceEnabled}
+                onValueChange={(val) => {
+                  setVoiceEnabled(val);
+                  voiceManager.setEnabled(val);
+                }}
+              />
+            </View> 
           </View>
         )}
 
@@ -1298,50 +1135,30 @@ const styles = StyleSheet.create({
     color: colors.white,
     opacity: 0.9,
   },
-  repCounterBox: {
-    position: 'absolute',
-    top: spacing.lg,
-    left: spacing.lg,
-    backgroundColor: 'rgba(245, 117, 16, 0.9)',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    flexDirection: 'row',
-    minWidth: 180,
-  },
-  repCounterSection: {
-    alignItems: 'flex-start',
-  },
-  repCounterLabel: {
-    fontSize: 11,
-    color: 'rgba(0, 0, 0, 0.8)',
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  repCounterValue: {
-    fontSize: 28,
-    color: colors.white,
-    fontWeight: '800',
-    lineHeight: 32,
-  },
+
+
   feedbackBox: {
     position: 'absolute',
     bottom: spacing.lg,
     left: spacing.lg,
     right: spacing.lg,
-    backgroundColor: 'rgba(0,0,0,0.8)',
     padding: spacing.md,
     borderRadius: 15,
   },
-  voiceToggleBox: {
-    position: 'absolute',
-    top: spacing.xl + 8,
-    right: spacing.lg,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    padding: spacing.sm,
-    borderRadius: 10,
+  /* Inline voice toggle (placed under mode label) */
+  voiceToggleInline: {
+    marginTop: 6,
     flexDirection: 'row',
     alignItems: 'center',
+    padding: spacing.sm,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
+  voiceToggleLabel: {
+    marginRight: 8,
+    color: colors.white,
+    fontWeight: '600',
+    fontSize: 12,
   },
   feedbackRow: {
     flexDirection: 'row',
@@ -1461,9 +1278,8 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: spacing.lg,
     left: spacing.lg,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 12,
@@ -1476,7 +1292,6 @@ const styles = StyleSheet.create({
   },
   angleLabel: {
     position: 'absolute',
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 8,
