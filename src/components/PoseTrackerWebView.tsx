@@ -12,6 +12,7 @@ import {
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize } from '../theme';
+import { voiceManager } from '../services/VoiceFeedbackManager';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -22,6 +23,7 @@ interface PoseTrackerWebViewProps {
   onStatusChange?: (status: string) => void;
   onDataReceived?: (data: any) => void;
   difficulty?: 'easy' | 'medium' | 'hard';
+  voiceEnabled?: boolean;
 }
 
 interface PoseTrackerData {
@@ -41,6 +43,7 @@ export const PoseTrackerWebView: React.FC<PoseTrackerWebViewProps> = ({
   onStatusChange,
   onDataReceived,
   difficulty = 'medium',
+  voiceEnabled = true,
 }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +52,11 @@ export const PoseTrackerWebView: React.FC<PoseTrackerWebViewProps> = ({
   const [postureMessage, setPostureMessage] = useState<string>('');
   const [detectionStatus, setDetectionStatus] = useState<string>('Initializing...');
   const webViewRef = useRef<WebView>(null);
+
+  // Update voice manager enabled state
+  React.useEffect(() => {
+    voiceManager.setEnabled(voiceEnabled);
+  }, [voiceEnabled]);
 
   // Build PoseTracker URL with all required parameters
   const poseTrackerUrl = `https://app.posetracker.com/pose_tracker/tracking?token=${apiKey}&exercise=${exercise}&difficulty=${difficulty}&width=${SCREEN_WIDTH}&height=${SCREEN_HEIGHT}&isMobile=${Platform.OS === 'ios' || Platform.OS === 'android'}&skeleton=true`;
@@ -86,17 +94,31 @@ export const PoseTrackerWebView: React.FC<PoseTrackerWebViewProps> = ({
     if (data.ready !== undefined) {
       setIsReady(data.ready);
       if (!data.ready && data.postureDirection) {
-        setPostureMessage(`Move ${data.postureDirection}`);
-        setDetectionStatus(`Position: Move ${data.postureDirection}`);
+        const message = `Move ${data.postureDirection}`;
+        setPostureMessage(message);
+        setDetectionStatus(`Position: ${message}`);
+        // Speak positioning instruction
+        voiceManager.speakText(message, 1);
       } else if (data.ready) {
-        setPostureMessage('Ready to start!');
+        const message = 'Ready to start!';
+        setPostureMessage(message);
         setDetectionStatus('Ready - Start exercising!');
+        // Speak readiness confirmation
+        voiceManager.speakText(message, 0);
       }
     }
 
     // Handle form score
     if (data.score !== undefined) {
       console.log(`[PoseTracker] Form score: ${data.score}`);
+      // Provide voice feedback based on score
+      if (data.score >= 85) {
+        voiceManager.speakText('Good form, keep going.', 0);
+      } else if (data.score >= 60) {
+        voiceManager.speakText('Adjust your form slightly.', 1);
+      } else {
+        voiceManager.speakText('Check your posture.', 2);
+      }
     }
 
     // Emit general data received callback

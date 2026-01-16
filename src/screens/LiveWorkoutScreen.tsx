@@ -12,11 +12,13 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import { storageService } from '../services/StorageService';
 import { poseTrackerService } from '../services/PoseTrackerService';
 import { colors, spacing, fontSize } from '../theme';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { PoseTrackerWebView } from '../components/PoseTrackerWebView';
+import StreakCelebration from '../components/StreakCelebration';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -38,6 +40,9 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
   const [timeElapsed, setTimeElapsed] = useState(0);
   const [repCount, setRepCount] = useState(0);
   const [detectionStatus, setDetectionStatus] = useState('Initializing PoseTracker...');
+  const [showStreakCelebration, setShowStreakCelebration] = useState(false);
+  const [celebrationDays, setCelebrationDays] = useState(0);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const intervalRef = React.useRef<NodeJS.Timeout | null>(null);
 
   // Initialize PoseTracker service
@@ -191,7 +196,15 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           <Ionicons name="close" size={28} color={colors.white} />
         </TouchableOpacity>
         <Text style={styles.exerciseTitle}>{exercise}</Text>
-        <View style={styles.headerSpacer} />
+        <View style={styles.voiceToggle}>
+          <Ionicons name="volume-high" size={20} color={colors.white} />
+          <Switch
+            value={voiceEnabled}
+            onValueChange={setVoiceEnabled}
+            trackColor={{ false: colors.gray400, true: colors.primary }}
+            thumbColor={voiceEnabled ? colors.white : colors.gray200}
+          />
+        </View>
       </View>
 
       <View style={styles.webViewContainer}>
@@ -203,6 +216,7 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
             onStatusChange={handleStatusChange}
             onDataReceived={handlePoseTrackerData}
             difficulty="medium"
+            voiceEnabled={voiceEnabled}
           />
         ) : (
           <View style={styles.placeholderContainer}>
@@ -238,6 +252,13 @@ export const LiveWorkoutScreen: React.FC<{ navigation: any; route: any }> = ({
           </View>
         )}
       </View>
+
+      <StreakCelebration
+        visible={showStreakCelebration}
+        days={celebrationDays}
+        onDismiss={() => setShowStreakCelebration(false)}
+        durationMs={2500}
+      />
     </SafeAreaView>
   );
 };
@@ -269,8 +290,10 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'center',
   },
-  headerSpacer: {
-    width: 40,
+  voiceToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
   },
   webViewContainer: {
     flex: 1,

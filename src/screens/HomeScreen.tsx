@@ -291,7 +291,7 @@ export const HomeScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                 <Text style={[styles.emptyStateSubtext, { color: colors.textSecondary }]}>
                   Start your first workout with AI-powered posture correction
                 </Text>
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={[styles.startWorkoutButton, { backgroundColor: colors.primary }]}
                   onPress={() => navigation.navigate('ExerciseSelection')}
                 >

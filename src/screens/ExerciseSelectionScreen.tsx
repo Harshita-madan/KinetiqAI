@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { colors, spacing, borderRadius, fontSize } from '../theme';
+import { TextInput } from '../components/TextInput';
+import { useFavoritesStore } from '../stores';
 
 interface Exercise {
   id: string;
@@ -121,6 +123,8 @@ interface ExerciseCardProps {
 }
 
 const ExerciseCard: React.FC<ExerciseCardProps> = ({ exercise, onPress }) => {
+  const { isFavorite, toggleFavorite } = useFavoritesStore();
+
   const getDifficultyColor = () => {
     switch (exercise.difficulty) {
       case 'Beginner':
@@ -132,6 +136,10 @@ const ExerciseCard: React.FC<ExerciseCardProps> = ({ exercise, onPress }) => {
       default:
         return colors.primary;
     }
+  };
+
+  const handleHeartPress = async () => {
+    await toggleFavorite(exercise.id);
   };
 
   return (
@@ -164,13 +172,25 @@ const ExerciseCard: React.FC<ExerciseCardProps> = ({ exercise, onPress }) => {
           </View>
         </View>
 
-        <Ionicons name="chevron-forward" size={24} color={colors.gray400} />
+        <View style={styles.cardActions}>
+          <TouchableOpacity onPress={handleHeartPress} style={styles.heartButton}>
+            <Ionicons
+              name={isFavorite(exercise.id) ? 'heart' : 'heart-outline'}
+              size={24}
+              color={isFavorite(exercise.id) ? '#E8569D' : colors.gray400}
+            />
+          </TouchableOpacity>
+          <Ionicons name="chevron-forward" size={24} color={colors.gray400} />
+        </View>
       </LinearGradient>
     </TouchableOpacity>
   );
 };
 
 export const ExerciseSelectionScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('');
+
   // Safe navigation back handler
   const handleSafeGoBack = () => {
     if (navigation.canGoBack()) {
@@ -190,6 +210,18 @@ export const ExerciseSelectionScreen: React.FC<{ navigation: any }> = ({ navigat
     });
   };
 
+  // Compute filtered exercises based on search query
+  // Case-insensitive partial match on exercise name
+  const filteredExercises = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return exercises;
+    }
+    const query = searchQuery.toLowerCase();
+    return exercises.filter(exercise =>
+      exercise.name.toLowerCase().includes(query)
+    );
+  }, [searchQuery]);
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
@@ -200,6 +232,16 @@ export const ExerciseSelectionScreen: React.FC<{ navigation: any }> = ({ navigat
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Choose Exercise</Text>
         <View style={{ width: 40 }} />
+      </View>
+
+      <View style={styles.searchContainer}>
+        <TextInput
+          placeholder="Search exercises..."
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          leftIcon={<Ionicons name="search" size={20} color={colors.gray400} />}
+          containerStyle={styles.searchInputContainer}
+        />
       </View>
 
       <ScrollView
@@ -215,16 +257,28 @@ export const ExerciseSelectionScreen: React.FC<{ navigation: any }> = ({ navigat
         </View>
 
         <View style={styles.exerciseList}>
-          {exercises.map((exercise) => (
-            <ExerciseCard
-              key={exercise.id}
-              exercise={exercise}
-              onPress={() => handleExerciseSelect(exercise)}
-            />
-          ))}
+          {filteredExercises.length > 0 ? (
+            filteredExercises.map((exercise) => (
+              <ExerciseCard
+                key={exercise.id}
+                exercise={exercise}
+                onPress={() => handleExerciseSelect(exercise)}
+              />
+            ))
+          ) : (
+            searchQuery.trim() && (
+              <View style={styles.noResultsContainer}>
+                <Ionicons name="search" size={48} color={colors.gray400} />
+                <Text style={styles.noResultsText}>No exercises found</Text>
+                <Text style={styles.noResultsSubtext}>
+                  Try adjusting your search terms
+                </Text>
+              </View>
+            )
+          )}
         </View>
 
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.customExerciseButton}
           onPress={() => {
             // Navigate to a generic workout mode
@@ -351,6 +405,14 @@ const styles = StyleSheet.create({
     color: colors.gray400,
     fontWeight: '500',
   },
+  cardActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  heartButton: {
+    padding: spacing.xs,
+  },
   customExerciseButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -368,5 +430,29 @@ const styles = StyleSheet.create({
     fontSize: fontSize.md,
     fontWeight: '600',
     color: colors.primary,
+  },
+  searchContainer: {
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.background,
+  },
+  searchInputContainer: {
+    marginBottom: 0,
+  },
+  noResultsContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.xl * 2,
+    gap: spacing.md,
+  },
+  noResultsText: {
+    fontSize: fontSize.lg,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  noResultsSubtext: {
+    fontSize: fontSize.md,
+    color: colors.gray400,
+    textAlign: 'center',
   },
 });

@@ -11,20 +11,23 @@ import {
   ChatScreen,
   ProfileScreen,
   EditProfileScreen,
+  ExploreScreen,
   ExerciseSelectionScreen,
   LiveWorkoutScreen,
   SessionSummaryScreen,
   HistoryScreen,
   ChatbotCoachScreen,
-  SignInScreen,
-  RoleSelectionScreen,
-  ProfileSetupScreen,
   FindPhysioScreen,
   MyProgramScreen,
   PhysioDashboardScreen,
   PatientDetailScreen,
   AssignProgramScreen,
 } from '../screens';
+import {
+  SignInScreen,
+  RoleSelectionScreen,
+  ProfileSetupScreen,
+} from '../screens/auth';
 
 export type RootStackParamList = {
   // Auth Stack
@@ -82,6 +85,15 @@ const MainTabs = () => {
         options={{
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="home" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tab.Screen
+        name="Explore"
+        component={ExploreScreen}
+        options={{
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="search" size={size} color={color} />
           ),
         }}
       />
@@ -160,7 +172,7 @@ export const AppNavigator: React.FC = () => {
             <Stack.Screen name="History" component={HistoryScreen} />
             <Stack.Screen name="ChatbotCoach" component={ChatbotCoachScreen} />
             <Stack.Screen name="EditProfile" component={EditProfileScreen} />
-            
+
             {/* Patient Screens */}
             <Stack.Screen name="FindPhysio" component={FindPhysioScreen} />
             <Stack.Screen name="MyProgram" component={MyProgramScreen} />
